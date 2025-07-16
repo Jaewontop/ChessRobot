@@ -35,15 +35,11 @@ void setup()
 
 void loop()
 {
-  keypad.getKeys(); // 항상 호출
-
-  for (int i = 0; i < LIST_MAX; i++)
+  // ✔️ 최근 눌린 한 개 키만 처리 (더 빠른 반응)
+  char key = keypad.getKey();
+  if (key != NO_KEY)
   {
-    char key = keypad.key[i].kchar;
-    if (keypad.key[i].kstate == PRESSED || keypad.key[i].kstate == HOLD)
-    {
-      moveServoForKey(key);
-    }
+    moveServoForKey(key);
   }
   delay(20); // 너무 빠른 반복 방지
 }
@@ -53,80 +49,42 @@ void moveServoForKey(char key)
   int servoIndex = -1;
   bool increase = false;
 
-  if (key == '1')
-  {
-    servoIndex = 0;
-    increase = true;
-  }
-  else if (key == '2')
-  {
-    servoIndex = 0;
-    increase = false;
-  }
-  else if (key == '5')
-  {
-    servoIndex = 1;
-    increase = true;
-  }
-  else if (key == '6')
-  {
-    servoIndex = 1;
-    increase = false;
-  }
-  else if (key == '9')
-  {
-    servoIndex = 2;
-    increase = true;
-  }
-  else if (key == '0')
-  {
-    servoIndex = 2;
-    increase = false;
-  }
-  else if (key == 'C')
-  {
-    servoIndex = 3;
-    increase = true;
-  }
-  else if (key == 'D')
-  {
-    servoIndex = 3;
-    increase = false;
-  }
-  else if (key == '3')
-  {
-    servoIndex = 4;
-    increase = true;
-  }
-  else if (key == '7')
-  {
-    servoIndex = 4;
-    increase = false;
-  }
-  else if (key == 'A')
-  {
-    servoIndex = 5;
-    increase = true;
-  }
-  else if (key == 'E')
-  {
-    servoIndex = 5;
-    increase = false;
-  }
-  else
-    return;
+  // ✔️ 서보 0번
+  if (key == '1') { servoIndex = 0; increase = true; }
+  else if (key == '2') { servoIndex = 0; increase = false; }
 
+  // ✔️ 서보 1번
+  else if (key == '3') { servoIndex = 1; increase = true; }
+  else if (key == '4') { servoIndex = 1; increase = false; }
+
+  // ✔️ 서보 2번
+  else if (key == '5') { servoIndex = 2; increase = true; }
+  else if (key == '6') { servoIndex = 2; increase = false; }
+
+  // ✔️ 서보 3번
+  else if (key == '7') { servoIndex = 3; increase = true; }
+  else if (key == '8') { servoIndex = 3; increase = false; }
+
+  // ✔️ 서보 4번
+  else if (key == '9') { servoIndex = 4; increase = true; }
+  else if (key == '0') { servoIndex = 4; increase = false; }
+
+  // ✔️ 서보 5번
+  else if (key == 'A') { servoIndex = 5; increase = true; }
+  else if (key == 'B') { servoIndex = 5; increase = false; }
+
+  else return;  // 해당되지 않는 키는 무시
+
+  // ✔️ 최종 서보 구동
   if (servoIndex >= 0 && servoIndex < numServos)
   {
     if (increase)
-    {
       servoPositions[servoIndex] = min(servoPositions[servoIndex] + step, maxPWM);
-    }
     else
-    {
       servoPositions[servoIndex] = max(servoPositions[servoIndex] - step, minPWM);
-    }
+
     pwm.setPWM(servoIndex, 0, servoPositions[servoIndex]);
+
     Serial.print("Servo ");
     Serial.print(servoIndex);
     Serial.print(increase ? " ↑ : " : " ↓ : ");
