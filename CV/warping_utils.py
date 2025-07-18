@@ -5,7 +5,6 @@ def find_chessboard_corners(frame):
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     blur = cv2.GaussianBlur(gray, (5, 5), 0)
     edges = cv2.Canny(blur, 50, 150)
-
     contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     max_area = 0
     best_quad = None
@@ -43,18 +42,31 @@ def warp_chessboard(frame, corners, size=400):
     warp = cv2.warpPerspective(frame, M, (size, size))
     return warp
 
-def main():
-    img = cv2.imread('ChessRobot/test.jpeg')
-    if img is None:
-        print('이미지를 불러올 수 없습니다.')
-        return
-    corners = find_chessboard_corners(img)
-    if corners is not None:
-        warp = warp_chessboard(img, corners)
-        cv2.imwrite('ChessRobot/warped_chessboard.jpg', warp)
-        print('와핑된 이미지를 ChessRobot/warped_chessboard.jpg로 저장했습니다.')
-    else:
-        print('체스판의 네 코너를 찾지 못했습니다.')
-
-if __name__ == '__main__':
-    main() 
+def find_green_corners(frame):
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    lower_green = np.array([40, 100, 100])
+    upper_green = np.array([80, 255, 255])
+    print(hsv)
+    mask = cv2.inRange(hsv, lower_green, upper_green)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((5,5), np.uint8))
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    centers = []
+    for cnt in contours:
+        area = cv2.contourArea(cnt)
+        if area > 50:
+            M = cv2.moments(cnt)
+            if M['m00'] != 0:
+                cx = int(M['m10']/M['m00'])
+                cy = int(M['m01']/M['m00'])
+                centers.append([cx, cy])
+    if len(centers) == 4:
+        pts = np.array(centers, dtype=np.float32)
+        rect = np.zeros((4, 2), dtype="float32")
+        s = pts.sum(axis=1)
+        rect[0] = pts[np.argmin(s)]
+        rect[2] = pts[np.argmax(s)]
+        diff = np.diff(pts, axis=1)
+        rect[1] = pts[np.argmin(diff)]
+        rect[3] = pts[np.argmax(diff)]
+        return rect
+    return None 
