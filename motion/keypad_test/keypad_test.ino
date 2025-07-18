@@ -14,10 +14,10 @@ const byte ROWS = 4;
 const byte COLS = 4;
 
 char keys[ROWS][COLS] = {
-    {'16', '15', '14', '13'},
-    {'12', '11', '10', '9'},
-    {'8', '7', '6', '5'},
-    {'4', '3', '2', '1'}};
+    {'A', 'B', 'C', 'D'},
+    {'E', 'F', 'G', 'H'},
+    {'I', 'J', 'K', 'L'},
+    {'M', 'N', 'O', 'P'}};
 
 byte rowPins[ROWS] = {22, 23, 24, 25};
 byte colPins[COLS] = {26, 27, 28, 29};
@@ -35,13 +35,13 @@ void setup()
 
 void loop()
 {
-  // ✔️ 최근 눌린 한 개 키만 처리 (더 빠른 반응)
   char key = keypad.getKey();
   if (key != NO_KEY)
   {
-    moveServoForKey(key);
+    Serial.println(key);
+    //moveServoForKey(key);
   }
-  delay(20); // 너무 빠른 반복 방지
+  delay(20);
 }
 
 void moveServoForKey(char key)
@@ -49,33 +49,28 @@ void moveServoForKey(char key)
   int servoIndex = -1;
   bool increase = false;
 
-  // ✔️ 서보 0번
-  if (key == '16') { servoIndex = 0; increase = true; }
-  else if (key == '15') { servoIndex = 0; increase = false; }
+   switch (key) {
+    case 'A': servoIndex = 0; increase = true; break;
+    case 'B': servoIndex = 0; increase = false; break;
 
-  // ✔️ 서보 1번
-  else if (key == '14') { servoIndex = 1; increase = true; }
-  else if (key == '13') { servoIndex = 1; increase = false; }
+    case 'C': servoIndex = 1; increase = true; break;
+    case 'D': servoIndex = 1; increase = false; break;
 
-  // ✔️ 서보 2번
-  else if (key == '12') { servoIndex = 2; increase = true; }
-  else if (key == '11') { servoIndex = 2; increase = false; }
+    case 'E': servoIndex = 2; increase = true; break;
+    case 'F': servoIndex = 2; increase = false; break;
 
-  // ✔️ 서보 3번
-  else if (key == '10') { servoIndex = 3; increase = true; }
-  else if (key == '9') { servoIndex = 3; increase = false; }
+    case 'G': servoIndex = 3; increase = true; break;
+    case 'H': servoIndex = 3; increase = false; break;
 
-  // ✔️ 서보 4번
-  else if (key == '8') { servoIndex = 4; increase = true; }
-  else if (key == '7') { servoIndex = 4; increase = false; }
+    case 'I': servoIndex = 4; increase = true; break;
+    case 'J': servoIndex = 4; increase = false; break;
 
-  // ✔️ 서보 5번
-  else if (key == '6') { servoIndex = 5; increase = true; }
-  else if (key == '5') { servoIndex = 5; increase = false; }
+    case 'K': servoIndex = 5; increase = true; break;
+    case 'L': servoIndex = 5; increase = false; break;
 
-  else return;  // 해당되지 않는 키는 무시
+    default: return;
+  }
 
-  // ✔️ 최종 서보 구동
   if (servoIndex >= 0 && servoIndex < numServos)
   {
     if (increase)
