@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from piece_recognition import gen_edges_frames as _gen_edges_frames
-from warping_utils import find_chessboard_corners, order_points, warp_chessboard, find_green_corners
+from warping_utils import find_green_corners, warp_chessboard, find_green_corners
 
 def gen_warped_frames(cap):
     while True:
@@ -9,20 +9,20 @@ def gen_warped_frames(cap):
         if not ret:
             break
         corners = find_green_corners(frame)
-        if corners is None:
-            corners = find_chessboard_corners(frame)
-        if corners is not None:
-            warp = warp_chessboard(frame, corners)
-            ret2, buffer = cv2.imencode('.jpg', warp)
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
-        else:
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            ret2, buffer = cv2.imencode('.jpg', gray)
-            frame_bytes = buffer.tobytes()
-            yield (b'--frame\r\n'
-                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        # if corners is None:
+        #     corners = find_green_corners(frame)
+        # if corners is not None:
+        warp = warp_chessboard(frame, corners)
+        ret2, buffer = cv2.imencode('.jpg', warp)
+        frame_bytes = buffer.tobytes()
+        yield (b'--frame\r\n'
+                b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        # else:
+        #     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        #     ret2, buffer = cv2.imencode('.jpg', gray)
+        #     frame_bytes = buffer.tobytes()
+        #     yield (b'--frame\r\n'
+        #            b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
 
 def gen_original_frames(cap):
     while True:
