@@ -20,6 +20,8 @@ bool turn_p1 = true;
 unsigned long prevMillis = 0;
 
 void setup() {
+  Serial.begin(9600);  // ← Serial 통신 시작
+
   pinMode(BTN1, INPUT_PULLUP);
   pinMode(BTN2, INPUT_PULLUP);
   
@@ -33,10 +35,12 @@ void loop() {
   // 버튼 눌러서 턴 전환
   if (digitalRead(BTN1) == LOW) {
     turn_p1 = false;
+    Serial.println("P1");  // ← Player1 버튼 눌림을 라파에 알림
     delay(200);  // 디바운싱
   }
   if (digitalRead(BTN2) == LOW) {
     turn_p1 = true;
+    Serial.println("P2");  // ← Player2 버튼 눌림을 라파에 알림
     delay(200);
   }
 
