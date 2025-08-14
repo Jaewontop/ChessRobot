@@ -1,0 +1,32 @@
+# Chess Robot Dependencies
+# 체스 로봇에 필요한 Python 패키지들
+
+# 기본 의존성
+typing-extensions>=4.0.0
+
+# 데이터 클래스 (Python 3.6 이하 버전용)
+dataclasses>=0.6; python_version<"3.7"
+
+# 체스 엔진/보드, FEN, 합법수, 판정
+python-chess>=1.999
+
+# 웹 대시보드
+flask>=2.0.0
+flask-socketio>=5.0.0
+eventlet>=0.30.0
+requests>=2.25.0
+
+# JSON 처리
+# (Python 3.6+ 에는 내장 json 모듈이 있음)
+
+# 시간 처리
+# (Python 3.6+ 에는 내장 time 모듈이 있음)
+
+# 스레딩
+# (Python 3.6+ 에는 내장 threading 모듈이 있음)
+
+# 랜덤
+# (Python 3.6+ 에는 내장 random 모듈이 있음)
+
+# UUID
+# (Python 3.6+ 에는 내장 uuid 모듈이 있음) 
