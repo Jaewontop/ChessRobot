@@ -14,41 +14,52 @@ TM1637Display display1(CLK1, DIO1);
 #define DIO2 A4
 TM1637Display display2(CLK2, DIO2);
 
-int time_p1 = 300;  // 5분
+int time_p1 = 300; // 5분
 int time_p2 = 300;
 bool turn_p1 = true;
 unsigned long prevMillis = 0;
 
-void setup() {
-  Serial.begin(9600);  // ← Serial 통신 시작
+void setup()
+{
+  Serial.begin(9600); // ← Serial 통신 시작
 
   pinMode(BTN1, INPUT_PULLUP);
   pinMode(BTN2, INPUT_PULLUP);
-  
-  display1.setBrightness(2);  // 밝기 0~7
+
+  display1.setBrightness(2); // 밝기 0~7
   display2.setBrightness(7);
 }
 
-void loop() {
+void loop()
+{
   unsigned long now = millis();
 
-  // 버튼 눌러서 턴 전환
-  if (digitalRead(BTN1) == LOW) {
-    turn_p1 = false;
-    Serial.println("P1");  // ← Player1 버튼 눌림을 라파에 알림
-    delay(200);  // 디바운싱
-  }
-  if (digitalRead(BTN2) == LOW) {
-    turn_p1 = true;
-    Serial.println("P2");  // ← Player2 버튼 눌림을 라파에 알림
-    delay(200);
+  // 1초마다 타이머 감소
+  if (now - prevMillis >= 1000)
+  {
+    prevMillis = now;
+    if (turn_p1 && time_p1 > 0)
+      time_p1--;
+    if (!turn_p1 && time_p2 > 0)
+      time_p2--;
+
+    // 1초마다 현재 시간 정보를 라즈베리파이로 전송
+    Serial.print("P1:");
+    Serial.print(time_p1);
+    Serial.print(",P2:");
+    Serial.println(time_p2);
   }
 
-  // 1초마다 타이머 감소
-  if (now - prevMillis >= 1000) {
-    prevMillis = now;
-    if (turn_p1 && time_p1 > 0) time_p1--;
-    if (!turn_p1 && time_p2 > 0) time_p2--;
+  // 버튼 눌러서 턴 전환
+  if (digitalRead(BTN1) == LOW)
+  {
+    turn_p1 = false;
+    delay(200); // 디바운싱
+  }
+  if (digitalRead(BTN2) == LOW)
+  {
+    turn_p1 = true;
+    delay(200);
   }
 
   // MMSS 포맷으로 변환 (예: 2분 5초 → 0205)

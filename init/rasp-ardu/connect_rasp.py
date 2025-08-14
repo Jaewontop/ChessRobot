@@ -9,16 +9,17 @@ BAUD = 9600
 
 arduino1 = None
 arduino2 = None
-prev_state = None
+prev_time_p1 = None
+prev_time_p2 = None
 
 def try_connect_arduino1():
     global arduino1
     try:
         arduino1 = serial.Serial(ARDUINO1_PORT, BAUD, timeout=0.1)
-        print(f"[✓] 아두이노1 연결 성공: {ARDUINO1_PORT}")
+        print(f"[✓] 아두이노1(타이머) 연결 성공: {ARDUINO1_PORT}")
         time.sleep(2)
     except serial.SerialException:
-        print(f"[!] 아두이노1 연결 실패: {ARDUINO1_PORT}")
+        print(f"[!] 아두이노1(타이머) 연결 실패: {ARDUINO1_PORT}")
         arduino1 = None
 
 def try_connect_arduino2():
@@ -49,21 +50,38 @@ try:
         else:
             try_connect_arduino2()
 
-        # 동시에 아두이노1에서 메시지 수신 여부 확인
+        # 아두이노1(타이머)에서 1초마다 전송되는 타이머 정보 수신
         if arduino1 and arduino1.in_waiting > 0:
             try:
                 msg = arduino1.readline().decode().strip()
-                if msg in ["P1", "P2"] and msg != prev_state:
-                    print(f"[✓] 턴 전환 감지: {msg}")
-                    prev_state = msg
+                if msg.startswith("P1:") and "," in msg and "P2:" in msg:
+                    # P1:시간,P2:시간 형식 파싱
+                    parts = msg.split(",")
+                    if len(parts) == 2:
+                        p1_part = parts[0]  # P1:시간
+                        p2_part = parts[1]  # P2:시간
+                        
+                        try:
+                            time_p1 = int(p1_part.split(":")[1])
+                            time_p2 = int(p2_part.split(":")[1])
+                            
+                            # 시간이 변경되었을 때만 출력
+                            if time_p1 != prev_time_p1 or time_p2 != prev_time_p2:
+                                print(f"[⏱️] 타이머 업데이트 - P1: {time_p1}초, P2: {time_p2}초")
+                                prev_time_p1 = time_p1
+                                prev_time_p2 = time_p2
+                                
+                        except (ValueError, IndexError):
+                            print(f"[!] 타이머 데이터 파싱 오류: {msg}")
+                            
             except serial.SerialException:
-                print("[!] 아두이노1 통신 오류")
+                print("[!] 아두이노1(타이머) 통신 오류")
                 arduino1.close()
                 arduino1 = None
         elif arduino1 is None:
             try_connect_arduino1()
 
-        time.sleep(1)  # 랜덤값 주기
+        time.sleep(1)  # 1초마다 체크
 
 except KeyboardInterrupt:
     print("\n[🛑] 사용자에 의해 종료됨 (Ctrl+C)")
