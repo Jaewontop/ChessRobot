@@ -5,6 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>♔ 체스 로봇 - Stockfish와 대전</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.2/socket.io.js"></script>
     <style>
         * {
             margin: 0;
@@ -197,6 +198,38 @@
             max-height: 200px;
             overflow-y: auto;
             background: white;
+        }
+
+        /* 로그 모니터링 스타일 */
+        .log-container {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #1e1e1e;
+            color: #ffffff;
+            padding: 10px;
+            border-radius: 8px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            margin-top: 10px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 2px 0;
+        }
+
+        .log-time {
+            color: #888;
+            margin-right: 8px;
+        }
+
+        .log-info { color: #87CEEB; }
+        .log-success { color: #90EE90; }
+        .log-warning { color: #FFD700; }
+        .log-error { color: #FF6B6B; }
+        .log-data { color: #FFA500; }
+
+        .move-item {
             border-radius: 10px;
             padding: 15px;
             border: 1px solid #dee2e6;
@@ -545,6 +578,8 @@
                 <div class="controls">
                     <button class="control-btn" onclick="resetGame()">새 게임</button>
                     <button class="control-btn primary" onclick="undoMove()">무르기</button>
+                    <button class="control-btn" onclick="startArduinoTimer()" id="arduinoTimerBtn" disabled>아두이노 타이머
+                        시작</button>
                 </div>
 
                 <div class="info-section">
@@ -601,20 +636,27 @@
         let timerInterval = null;
         let websocket = null; // WebSocket 연결
 
-        // WebSocket 연결 설정
+        // Socket.IO 연결 설정
         function connectWebSocket() {
             try {
-                // WebSocket 서버 주소 (라즈베리파이의 IP와 포트)
-                const wsUrl = `ws://${window.location.hostname}:8765`;
-                websocket = new WebSocket(wsUrl);
+                // Socket.IO 클라이언트 초기화
+                const socket = io();
 
-                websocket.onopen = function (event) {
-                    console.log('WebSocket 연결 성공');
-                };
+                socket.on('connect', function () {
+                    console.log('Socket.IO 연결 성공');
+                    websocket = socket;
 
-                websocket.onmessage = function (event) {
-                    const data = event.data;
-                    console.log('WebSocket에서 받은 데이터:', data);
+                    // 연결 성공 시 아두이노 타이머 버튼 활성화
+                    const btn = document.getElementById('arduinoTimerBtn');
+                    if (btn) {
+                        btn.disabled = false;
+                        btn.textContent = '아두이노 타이머 시작';
+                        btn.style.background = '';
+                    }
+                });
+
+                socket.on('timer_data', function (data) {
+                    console.log('타이머 데이터 수신:', data);
 
                     // P1:시간,P2:시간 형식 파싱
                     if (data.startsWith('P1:') && data.includes(',P2:')) {
@@ -631,20 +673,50 @@
                             }
                         }
                     }
-                };
+                });
 
-                websocket.onclose = function (event) {
-                    console.log('WebSocket 연결 종료');
+                socket.on('arduino_timer_response', function (data) {
+                    console.log('아두이노 타이머 응답:', data);
+
+                    if (data.status === 'started') {
+                        console.log('아두이노 타이머 시작됨');
+                    } else if (data.status === 'stopped') {
+                        console.log('아두이노 타이머 정지됨');
+                        // 버튼 상태 복원
+                        const btn = document.getElementById('arduinoTimerBtn');
+                        if (btn) {
+                            btn.textContent = '아두이노 타이머 시작';
+                            btn.disabled = false;
+                            btn.style.background = '';
+                        }
+                    } else if (data.status === 'reset') {
+                        console.log('아두이노 타이머 리셋됨');
+                    } else if (data.status === 'error') {
+                        console.error('아두이노 타이머 오류:', data.message);
+                        alert('아두이노 타이머 오류: ' + data.message);
+                        // 오류 시 버튼 상태 복원
+                        const btn = document.getElementById('arduinoTimerBtn');
+                        if (btn) {
+                            btn.textContent = '아두이노 타이머 시작';
+                            btn.disabled = false;
+                            btn.style.background = '';
+                        }
+                    }
+                });
+
+                socket.on('disconnect', function () {
+                    console.log('Socket.IO 연결 종료');
+                    websocket = null;
                     // 재연결 시도
                     setTimeout(connectWebSocket, 3000);
-                };
+                });
 
-                websocket.onerror = function (error) {
-                    console.error('WebSocket 오류:', error);
-                };
+                socket.on('connect_error', function (error) {
+                    console.error('Socket.IO 연결 오류:', error);
+                });
 
             } catch (error) {
-                console.error('WebSocket 연결 실패:', error);
+                console.error('Socket.IO 연결 실패:', error);
             }
         }
 
@@ -847,10 +919,27 @@
                         updateGameState(data.board_state);
                         placePiecesFromFen(data.board_state.fen);
 
-                        // 타이머 시작
-                        resetTimer();
-                        startTimer();
-                        connectWebSocket(); // WebSocket 연결 시작
+                        // WebSocket 연결 시작
+                        connectWebSocket();
+
+                        // WebSocket 연결 후 아두이노 타이머 시작
+                        setTimeout(() => {
+                            if (websocket && websocket.connected) {
+                                startArduinoTimer();
+                                console.log('게임 시작됨 - 아두이노 타이머 자동 시작');
+                            } else {
+                                console.log('WebSocket 연결 대기 중...');
+                                // 연결이 안 되면 3초 후 다시 시도
+                                setTimeout(() => {
+                                    if (websocket && websocket.connected) {
+                                        startArduinoTimer();
+                                        console.log('게임 시작됨 - 아두이노 타이머 시작 (지연)');
+                                    } else {
+                                        console.log('WebSocket 연결 실패');
+                                    }
+                                }, 3000);
+                            }
+                        }, 1000);
                     }
                 })
                 .catch(error => {
@@ -988,6 +1077,12 @@
             `;
 
             gameOverDiv.classList.remove('hidden');
+
+            // 게임 종료 시 타이머 정지
+            stopTimer();
+
+            // 아두이노 타이머도 정지
+            stopArduinoTimer();
 
             // 게임 종료 시 선택된 기물과 합법적인 이동 표시 제거
             clearSelection();
@@ -1271,25 +1366,88 @@
             return square && square.dataset.piece;
         }
 
-        // 타이머 시작 (아두이노에서 자동으로 시간을 보내주므로 간단하게 처리)
+        // 타이머 시작 (아두이노 데이터만 사용)
         function startTimer() {
-            console.log('타이머 시작 - 아두이노에서 시간 데이터를 받습니다');
-            // 아두이노에서 1초마다 시간을 보내주므로 별도의 감소 로직 불필요
+            console.log('타이머 시작 - 아두이노 데이터 대기 중');
+            // 아두이노에서 타이머 데이터를 보내주므로 자동 감소 로직 불필요
         }
 
         // 타이머 정지
         function stopTimer() {
             console.log('타이머 정지');
-            // WebSocket 연결은 유지 (아두이노에서 계속 시간 데이터 전송)
+            // 아두이노 타이머는 계속 작동
         }
 
         // 타이머 리셋 (아두이노에서 초기화)
         function resetTimer() {
-            console.log('타이머 리셋 - 아두이노에서 초기화됩니다');
-            // 아두이노에서 5분(300초)으로 초기화
-            whiteTimer = 300;
-            blackTimer = 300;
+            console.log('타이머 리셋 - 아두이노에서 초기화됨');
+            // 아두이노에서 10분(600초)으로 초기화
+            whiteTimer = 600;
+            blackTimer = 600;
             updateTimerDisplay();
+        }
+
+        // 시간 초과 처리 (아두이노에서 처리)
+        function handleTimeOut() {
+            // 아두이노에서 시간 초과를 감지하고 처리하므로 여기서는 로그만
+            console.log('아두이노에서 시간 초과 처리됨');
+        }
+
+        // 아두이노 타이머 시작
+        function startArduinoTimer() {
+            console.log('아두이노 타이머 시작 요청');
+
+            // WebSocket을 통해 아두이노에 타이머 시작 신호 전송
+            if (websocket && websocket.connected) {
+                websocket.emit('start_arduino_timer', {
+                    action: 'start',
+                    time: 600, // 10분
+                    message: 'START_TIMER'
+                });
+                console.log('아두이노 타이머 시작 신호 전송됨');
+
+                // 버튼 상태 변경
+                const btn = document.getElementById('arduinoTimerBtn');
+                btn.textContent = '타이머 실행 중...';
+                btn.disabled = true;
+                btn.style.background = '#28a745';
+            } else {
+                console.log('WebSocket 연결이 없습니다');
+                alert('WebSocket 연결을 확인해주세요');
+            }
+        }
+
+        // 아두이노 타이머 정지
+        function stopArduinoTimer() {
+            console.log('아두이노 타이머 정지 요청');
+
+            if (websocket && websocket.connected) {
+                websocket.emit('stop_arduino_timer', {
+                    action: 'stop',
+                    message: 'STOP_TIMER'
+                });
+                console.log('아두이노 타이머 정지 신호 전송됨');
+
+                // 버튼 상태 복원
+                const btn = document.getElementById('arduinoTimerBtn');
+                btn.textContent = '아두이노 타이머 시작';
+                btn.disabled = false;
+                btn.style.background = '';
+            }
+        }
+
+        // 아두이노 타이머 리셋
+        function resetArduinoTimer() {
+            console.log('아두이노 타이머 리셋 요청');
+
+            if (websocket && websocket.connected) {
+                websocket.emit('reset_arduino_timer', {
+                    action: 'reset',
+                    time: 600, // 10분으로 리셋
+                    message: 'RESET_TIMER'
+                });
+                console.log('아두이노 타이머 리셋 신호 전송됨');
+            }
         }
 
         // 타이머 표시 업데이트
@@ -1318,23 +1476,7 @@
                 blackTimerDiv.classList.add(blackTimer <= 30 ? 'danger' : 'warning');
             }
 
-            // 시간 초과 체크
-            if (whiteTimer <= 0) {
-                alert('흰색 시간 초과! 검은색 승리!');
-                // 게임 종료 처리
-                if (currentGame) {
-                    // 게임 종료 API 호출 또는 상태 업데이트
-                    console.log('흰색 시간 초과로 게임 종료');
-                }
-            }
-            if (blackTimer <= 0) {
-                alert('검은색 시간 초과! 흰색 승리!');
-                // 게임 종료 처리
-                if (currentGame) {
-                    // 게임 종료 API 호출 또는 상태 업데이트
-                    console.log('검은색 시간 초과로 게임 종료');
-                }
-            }
+            // 시간 초과 체크는 startTimer 함수에서 처리
         }
 
 
@@ -1640,8 +1782,12 @@
                         document.getElementById('gameStatus').style.fontWeight = 'normal';
                         document.getElementById('currentTurn').textContent = '';
 
-                        // 타이머 리셋
+                        // 타이머 리셋 및 정지
+                        stopTimer();
                         resetTimer();
+
+                        // 아두이노 타이머도 정지
+                        stopArduinoTimer();
                     }
                 })
                 .catch(error => {

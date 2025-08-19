@@ -11,8 +11,11 @@ import subprocess
 import tempfile
 import json
 import time
+import threading
+import serial
 from datetime import datetime
 from flask import Flask, render_template, request, jsonify, session
+from flask_socketio import SocketIO, emit
 
 # python-chess 라이브러리 import
 import chess
@@ -26,11 +29,111 @@ app = Flask(__name__,
             template_folder='brain/templates')
 app.secret_key = 'chess_robot_secret_key'
 
+# Flask-SocketIO 초기화
+socketio = SocketIO(app, cors_allowed_origins="*")
+
 # Stockfish 엔진 경로
-STOCKFISH_PATH = '/opt/homebrew/bin/stockfish'
+STOCKFISH_PATH = '/usr/games/stockfish'
+
+# 아두이노 시리얼 연결
+arduino_serial = None
+arduino_port = "/dev/ttyACM0"  # 포트는 환경에 맞게 수정
+arduino_baud = 9600
 
 # 게임 상태 저장소
 games = {}
+
+def connect_arduino():
+    """아두이노 시리얼 연결"""
+    global arduino_serial
+    try:
+        arduino_serial = serial.Serial(arduino_port, arduino_baud, timeout=1)
+        print(f"[✓] 아두이노 연결 성공: {arduino_port}")
+        return True
+    except serial.SerialException as e:
+        print(f"[!] 아두이노 연결 실패: {arduino_port} - {e}")
+        return False
+
+def read_arduino_data():
+    """아두이노에서 타이머 데이터 읽기"""
+    global arduino_serial
+    if not arduino_serial:
+        return None
+    
+    try:
+        if arduino_serial.in_waiting > 0:
+            data = arduino_serial.readline().decode().strip()
+            if data.startswith('P1:') and ',P2:' in data:
+                return data
+    except Exception as e:
+        print(f"[!] 아두이노 데이터 읽기 오류: {e}")
+    
+    return None
+
+def broadcast_timer_data():
+    """연결된 모든 WebSocket 클라이언트에 타이머 데이터 전송"""
+    while True:
+        try:
+            timer_data = read_arduino_data()
+            if timer_data:
+                print(f"[→] 타이머 데이터 전송: {timer_data}")
+                
+                # timer_data가 string인지 확인하고 안전하게 전송
+                if isinstance(timer_data, str):
+                    # Flask 앱 컨텍스트 내에서 emit 실행
+                    with app.app_context():
+                        socketio.emit('timer_data', timer_data)
+                else:
+                    # string이 아닌 경우 변환 시도
+                    try:
+                        safe_data = str(timer_data)
+                        with app.app_context():
+                            socketio.emit('timer_data', safe_data)
+                        print(f"[→] 데이터 변환 후 전송: {safe_data}")
+                    except Exception as conv_error:
+                        print(f"[!] 데이터 변환 실패: {conv_error}")
+                        # 기본값 전송
+                        with app.app_context():
+                            socketio.emit('timer_data', "타이머 데이터 오류")
+            else:
+                # 아두이노 데이터가 없을 때 테스트 데이터 전송 (디버깅용)
+                test_data = f"P1:{int(time.time()) % 100},P2:{int(time.time()) % 100}"
+                print(f"[→] 테스트 데이터 전송: {test_data}")
+                try:
+                    with app.app_context():
+                        socketio.emit('timer_data', test_data)
+                        print(f"[✓] 테스트 데이터 emit 성공: {test_data}")
+                except Exception as emit_error:
+                    print(f"[!] 테스트 데이터 emit 실패: {emit_error}")
+            
+            time.sleep(1)  # 1초마다 체크
+        except Exception as e:
+            print(f"[!] 타이머 데이터 브로드캐스트 오류: {e}")
+            time.sleep(1)
+
+def send_arduino_command(command):
+    """아두이노에 명령 전송"""
+    global arduino_serial
+    if arduino_serial and arduino_serial.is_open:
+        try:
+            arduino_serial.write(f"{command}\n".encode())
+            print(f"[→] 아두이노 명령 전송: {command}")
+            return True
+        except Exception as e:
+            print(f"[!] 아두이노 명령 전송 오류: {e}")
+            return False
+    return False
+
+# 아두이노 연결 및 타이머 데이터 읽기 스레드 시작
+def start_arduino_thread():
+    """아두이노 연결 및 데이터 읽기 스레드 시작"""
+    if connect_arduino():
+        # 일반 스레드로 실행하되 Flask 앱 컨텍스트 사용
+        timer_thread = threading.Thread(target=broadcast_timer_data, daemon=True)
+        timer_thread.start()
+        print("[✓] 아두이노 타이머 스레드 시작 (Flask 컨텍스트 사용)")
+    else:
+        print("[!] 아두이노 연결 실패로 타이머 기능 비활성화")
 
 class ChessGame:
     """체스 게임 클래스 - python-chess 사용"""
@@ -403,6 +506,60 @@ def reset_game():
     session.pop('game_id', None)
     return jsonify({'success': True})
 
+# WebSocket 이벤트 핸들러
+@socketio.on('connect')
+def handle_connect():
+    """클라이언트 연결"""
+    print(f"[✓] WebSocket 클라이언트 연결: {request.sid}")
+    emit('connected', {'status': 'connected'})
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    """클라이언트 연결 해제"""
+    print(f"[!] WebSocket 클라이언트 연결 해제: {request.sid}")
+
+@socketio.on('timer_update')
+def handle_timer_update(data):
+    """타이머 업데이트 (아두이노에서 받은 데이터)"""
+    print(f"[→] 타이머 데이터 수신: {data}")
+    
+    # data가 string이 아닌 경우 string으로 변환
+    if not isinstance(data, str):
+        try:
+            data = str(data)
+        except:
+            data = "데이터 변환 오류"
+    
+    # 모든 클라이언트에게 타이머 데이터 전송
+    emit('timer_data', data)
+
+@socketio.on('start_arduino_timer')
+def handle_start_arduino_timer(data):
+    """아두이노 타이머 시작"""
+    print(f"[→] 아두이노 타이머 시작 요청: {data}")
+    if send_arduino_command("START_TIMER"):
+        socketio.emit('arduino_timer_response', {'status': 'started', 'message': '타이머가 시작되었습니다'})
+    else:
+        socketio.emit('arduino_timer_response', {'status': 'error', 'message': '타이머 시작에 실패했습니다'})
+
+@socketio.on('stop_arduino_timer')
+def handle_stop_arduino_timer(data):
+    """아두이노 타이머 정지"""
+    print(f"[→] 아두이노 타이머 정지 요청: {data}")
+    if send_arduino_command("STOP_TIMER"):
+        socketio.emit('arduino_timer_response', {'status': 'stopped', 'message': '타이머가 정지되었습니다'})
+    else:
+        socketio.emit('arduino_timer_response', {'status': 'error', 'message': '타이머 정지에 실패했습니다'})
+
+@socketio.on('reset_arduino_timer')
+def handle_reset_arduino_timer(data):
+    """아두이노 타이머 리셋"""
+    print(f"[→] 아두이노 타이머 리셋 요청: {data}")
+    if send_arduino_command("RESET_TIMER"):
+        socketio.emit('arduino_timer_response', {'status': 'reset', 'message': '타이머가 리셋되었습니다'})
+    else:
+        socketio.emit('arduino_timer_response', {'status': 'error', 'message': '타이머 리셋에 실패했습니다'})
+
 def main():
     """메인 함수"""
     # Stockfish 확인
@@ -421,10 +578,15 @@ def main():
         print("[!] pip install python-chess를 실행해주세요.")
         return
     
-    print("♔ 웹 체스 게임 서버 시작 (python-chess 사용)")
-    print("♔ 서버 주소: http://localhost:5001")
+    # 아두이노 연결 및 타이머 데이터 읽기 스레드 시작
+    start_arduino_thread()
     
-    app.run(debug=True, host='0.0.0.0', port=5001)
+    print("♔ 웹 체스 게임 서버 시작 (python-chess + WebSocket 사용)")
+    print("♔ 서버 주소: http://localhost:5001")
+    print("♔ WebSocket 지원 활성화")
+    print("♔ 아두이노 타이머 지원 활성화")
+    
+    socketio.run(app, debug=True, host='0.0.0.0', port=5001)
 
 if __name__ == '__main__':
     main()

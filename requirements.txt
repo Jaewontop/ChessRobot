@@ -16,6 +16,25 @@ flask-socketio>=5.0.0
 eventlet>=0.30.0
 requests>=2.25.0
 
+# 아두이노 시리얼 통신
+pyserial>=3.5
+
+# WebSocket 및 실시간 통신
+python-socketio>=5.12.0
+python-engineio>=4.11.0
+
+# 비동기 처리
+asyncio
+
+# 시스템 및 프로세스 관리
+psutil>=5.8.0
+
+# 환경 변수 관리
+python-dotenv>=0.19.0
+
+# 로깅
+colorlog>=6.6.0
+
 # JSON 처리
 # (Python 3.6+ 에는 내장 json 모듈이 있음)
 
