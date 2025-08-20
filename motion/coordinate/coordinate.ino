@@ -9,7 +9,6 @@ bool received = false; // 텍스트 수신 여부
 
 string start = "";
 string end = "";
-string moves[2]; // 필요한 움직임 수
 
 float X[8] = {-9.45, -6.75, -4.05, -1.35, 1.35, 4.05, 6.75, 9.45};
 float Y[8] = {2.95, 5.65, 8.35, 11.05, 13.75, 16.45, 19.15, 21.85};
@@ -37,8 +36,6 @@ void loop() {
   if received{
     if (messege[0] = 'n'){
       for (int i = 0; i < 3; i++){
-        
-        cacluateAndMove
       }
       start = message.substring[7,9];
       end = message.substring[10];
