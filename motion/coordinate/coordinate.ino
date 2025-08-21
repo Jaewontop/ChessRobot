@@ -66,7 +66,7 @@ String getMessage()
 // 체스 기물 이동 함수
 void calculateAndMove(float x, float y, float z)
 {
-  // TODO: 실제 3L_ik.ino에 있는 함수와 연동하기
+  // TODO: 실제 3L_ik.ino에 있는 함수와 연동하기 - 최윤서 할거
   Serial.print("이동: X=");
   Serial.print(x);
   Serial.print(", Y=");
@@ -74,6 +74,7 @@ void calculateAndMove(float x, float y, float z)
   Serial.print(", Z=");
   Serial.println(z);
 }
+
 
 // 그리퍼 제어 함수들
 void gripperClose()

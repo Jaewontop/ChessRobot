@@ -4,6 +4,7 @@
 터미널 기반 체스 게임
 아두이노 타이머와 연동하여 터미널에서 체스 게임 진행
 모니터링 서버와 연동하여 외부에서 게임 상태 확인 가능
+로봇팔 제어를 위한 움직임 분석 및 명령 전송 기능 포함
 """
 
 import os
@@ -27,9 +28,27 @@ from engine_manager import (
     evaluate_position,
     engine_make_best_move,
 )
+from robot_arm_controller import (
+    init_robot_arm,
+    connect_robot_arm,
+    disconnect_robot_arm,
+    execute_robot_move,
+    configure_robot_arm,
+    get_robot_status,
+    test_robot_connection,
+    is_robot_moving,
+    get_move_description
+)
+from move_analyzer import (
+    analyze_coordinates,
+    analyze_move_with_context,
+    suggest_move,
+    get_all_possible_moves
+)
 
 # Stockfish 경로
-STOCKFISH_PATH = '/usr/games/stockfish'
+#STOCKFISH_PATH = '/usr/games/stockfish'
+STOCKFISH_PATH = '/opt/homebrew/bin/stockfish'
 
 # 모니터링 서버 설정
 MONITOR_SERVER_URL = 'http://localhost:5002'
@@ -42,52 +61,27 @@ difficulty = 15
 game_over = False
 move_count = 0
 
-
-
-def update_monitor_server(board_fen=None, black_timer=None, white_timer=None, 
-                         current_turn=None, game_status=None, last_move=None, 
-                         move_count=None, is_game_active=None):
-    """모니터링 서버에 게임 상태 업데이트"""
-    if not ENABLE_MONITORING:
-        return
-    
-    try:
-        data = {}
-        if board_fen is not None:
-            data['board_fen'] = board_fen
-        if black_timer is not None:
-            data['black_timer'] = black_timer
-        if white_timer is not None:
-            data['white_timer'] = white_timer
-        if current_turn is not None:
-            data['current_turn'] = current_turn
-        if game_status is not None:
-            data['game_status'] = game_status
-        if last_move is not None:
-            data['last_move'] = last_move
-        if move_count is not None:
-            data['move_count'] = move_count
-        if is_game_active is not None:
-            data['is_game_active'] = is_game_active
-        
-        # if data:
-        #     response = requests.post(f"{MONITOR_SERVER_URL}/api/update_board", 
-        #                           json=data, timeout=1)
-        #     if response.status_code == 200:
-        #         print(f"[✓] 모니터링 서버 업데이트 성공")
-        #     else:
-        #         print(f"[!] 모니터링 서버 업데이트 실패: {response.status_code}")
-    except Exception as e:
-        print(f"[!] 모니터링 서버 연결 오류: {e}")
+# 로봇팔 제어 설정 (robot_arm_controller에서 관리)
 
 def display_board():
     """체스보드를 터미널에 표시"""
-    os.system('clear')
+    #os.system('clear')
     print("♔ 터미널 체스 게임 ♔")
     print("=" * 50)
     
     # 타이머 표시
     print(f"{get_timer_display()}")
+    
+    # 로봇팔 상태 표시
+    if is_robot_moving():
+        print("🤖 로봇이 움직이는 중...")
+    else:
+        robot_status = get_robot_status()
+        if robot_status['is_connected']:
+            print("🤖 로봇팔 대기 중")
+        else:
+            print("🤖 로봇팔 연결 안됨")
+    
     print("-" * 50)
 
     # 엔진 평가 표시 (승률/점수/권장수)
@@ -98,6 +92,9 @@ def display_board():
             cp = eval_data.get('cp')
             mate = eval_data.get('mate')
             best_san = eval_data.get('best_move_san')
+            best_move = eval_data.get('best_move')
+            move_type = eval_data.get('move_type')
+            
             line = "평가: "
             if mate is not None:
                 line += f"체크메이트 경로 (mate {mate:+d})"
@@ -113,6 +110,32 @@ def display_board():
             if best_san:
                 line += f" | 권장수: {best_san}"
             print(line)
+            
+            # 움직임 타입 정보 표시 (정보만 표시, 명령 전송 없음)
+            if move_type and best_move:
+                move_type_names = {
+                    'normal': '일반 이동',
+                    'capture': '기물 잡기',
+                    'en_passant': '앙파상',
+                    'castling': '캐슬링',
+                    'promotion': '프로모션'
+                }
+                move_type_name = move_type_names.get('unknown', '알 수 없음')
+                
+                # move_type에서 실제 타입 확인
+                if move_type.get('is_castling'):
+                    move_type_name = '캐슬링'
+                elif move_type.get('is_en_passant'):
+                    move_type_name = '앙파상'
+                elif move_type.get('is_capture'):
+                    move_type_name = '기물 잡기'
+                elif move_type.get('is_promotion'):
+                    move_type_name = '프로모션'
+                else:
+                    move_type_name = '일반 이동'
+                
+                print(f"움직임 타입: {move_type_name}")
+            
             print("-" * 50)
     except Exception as _e:
         # 평가 실패 시 조용히 넘어감
@@ -184,27 +207,49 @@ def check_time_over() -> bool:
     return False
 
 def get_move_from_user():
-    """사용자로부터 이동 입력 받기"""
+    """사용자로부터 이동 입력 받기 (순서 상관없음)"""
     while True:
         try:
-            move_input = input("이동 입력 (예: e2e4, q to quit): ").strip().lower()
+            move_input = input("이동 입력 (예: e2e4 또는 e4e2, q to quit): ").strip().lower()
             
             if move_input == 'q':
                 return 'quit'
             
             if len(move_input) == 4:
-                #TODO: 나중에 여기 CV에서 받아온 두 좌표로 집어넣기
-                from_square = chess.parse_square(move_input[:2])
-                to_square = chess.parse_square(move_input[2:])
+                # 두 좌표 추출
+                coord1 = move_input[:2]
+                coord2 = move_input[2:]
                 
-                # 이동 유효성 검사
-                move = chess.Move(from_square, to_square)
-                if move in current_board.legal_moves:
-                    return move
+                # 움직임 분석 (순서 자동 판단)
+                #TODO: CV에서 coord1,coord2 받아와서 집어넣기
+                move_tuple = analyze_coordinates(current_board, coord1, coord2)
+                
+                if move_tuple:
+                    from_square, to_square = move_tuple
+                    
+                    # 분석 결과 표시
+                    suggestion = suggest_move(current_board, coord1, coord2)
+                    print(f"🤖 {suggestion}")
+                    
+                    # 이동 유효성 검사
+                    from_sq = chess.parse_square(from_square)
+                    to_sq = chess.parse_square(to_square)
+                    move = chess.Move(from_sq, to_sq)
+                    
+                    if move in current_board.legal_moves:
+                        return move
+                    else:
+                        print("❌ 잘못된 이동입니다!")
                 else:
-                    print("❌ 잘못된 이동입니다!")
+                    print("❌ 유효하지 않은 움직임입니다!")
+                    print("💡 가능한 움직임들:")
+                    possible_moves = get_all_possible_moves(current_board)
+                    for i, move_info in enumerate(possible_moves[:5], 1):  # 상위 5개만 표시
+                        print(f"   {i}. {move_info['piece']}: {move_info['from']} → {move_info['to']} ({move_info['type']})")
+                    if len(possible_moves) > 5:
+                        print(f"   ... 총 {len(possible_moves)}개 움직임 가능")
             else:
-                print("❌ 올바른 형식으로 입력하세요 (예: e2e4)")
+                print("❌ 올바른 형식으로 입력하세요 (예: e2e4 또는 e4e2)")
                 
         except ValueError:
             print("❌ 잘못된 좌표입니다!")
@@ -214,6 +259,30 @@ def get_move_from_user():
 def make_stockfish_move():
     """Stockfish가 수를 두도록 함 (engine_manager 사용)"""
     try:
+        # Stockfish 차례일 때만 로봇팔 명령 분석 및 전송
+        # 움직임 전에 현재 보드 상태에서 최선의 수 분석
+        eval_data = evaluate_position(current_board, depth=difficulty)
+        if eval_data and eval_data.get('best_move'):
+            best_move = eval_data['best_move']
+            move_type = eval_data.get('move_type')
+            
+            # 로봇팔 명령 분석 및 실행 (연결 상태와 관계없이)
+            if move_type:
+                move_desc = get_move_description(move_type, best_move)
+                print(f"🤖 {move_desc} 실행 중...")
+                
+                # 로봇팔 명령 실행 (연결되지 않아도 명령 분석 및 표시)
+                success = execute_robot_move(move_type, best_move)
+                if success:
+                    robot_status = get_robot_status()
+                    if robot_status['is_connected']:
+                        print("✅ 로봇팔 명령 전송 성공")
+                    else:
+                        print("✅ 명령 분석 완료 (로봇팔 미연결)")
+                else:
+                    print("❌ 로봇팔 명령 실행 실패")
+        
+        # 실제 움직임 실행
         moved = engine_make_best_move(current_board, depth=difficulty)
         if moved:
             move, san = moved
@@ -245,6 +314,20 @@ def main():
     # 엔진 초기화
     init_engine()
     
+    # 로봇팔 초기화
+    print(f"[→] 로봇팔 초기화 중...")
+    init_robot_arm(enabled=True, port='/dev/ttyUSB0', baudrate=9600)
+    
+    # 로봇팔 연결 시도
+    if test_robot_connection():
+        print("[✓] 로봇팔 연결 테스트 성공")
+        if connect_robot_arm():
+            print("[✓] 로봇팔 연결 완료")
+        else:
+            print("[!] 로봇팔 연결 실패 - 명령 전송 없이 진행")
+    else:
+        print("[!] 로봇팔 연결 테스트 실패 - 명령 전송 없이 진행")
+    
     # 아두이노 타이머 연결
     print(f"[→] 아두이노 타이머 연결 시도 중...")
     if not init_chess_timer():
@@ -274,20 +357,6 @@ def main():
     print(f"[→] 게임 종료 여부: {current_board.is_game_over()}")
     print(f"[→] 현재 차례: {'흰색' if current_board.turn == chess.WHITE else '검은색'}")
     
-    # 모니터링 서버 초기화
-    if ENABLE_MONITORING:
-        print(f"[→] 모니터링 서버 초기화 중...")
-        update_monitor_server(
-            board_fen=current_board.fen(),
-            black_timer=get_black_timer(),
-            white_timer=get_white_timer(),
-            current_turn="white",
-            game_status="게임 시작",
-            move_count=0,
-            is_game_active=True
-        )
-        print(f"[✓] 모니터링 서버 초기화 완료")
-        print(f"[→] 모바일에서 확인: http://[라즈베리파이_IP]:5002")
     
     # 플레이어가 검은색인 경우 Stockfish가 첫 수를 둠
     if player_color == 'black':
@@ -327,9 +396,12 @@ def main():
             except Exception:
                 san_user = move.uci()
             print(f"[DEBUG] 사용자 수 입력: {move.uci()} (SAN: {san_user})")
+            
+            # 사용자 움직임 실행 (로봇팔 명령 전송 없음)
             current_board.push(move)
             move_count += 1
             print(f"✅ 이동: {move}")
+            
             # 시간 초과 검사 (사용자 수 후)
             if check_time_over():
                 game_over = True
@@ -339,18 +411,18 @@ def main():
                 print(f"[DEBUG] 사용자 수 이후 게임 종료: {describe_game_end(current_board)}")
                 game_over = True
                 break
-            
-            # 모니터링 서버에 이동 정보 업데이트
-            # update_monitor_server(
-            #     last_move=str(move),
-            #     move_count=move_count,
-            #     black_timer=get_black_timer(),
-            #     white_timer=get_white_timer()
-            # )
-            
         # Stockfish 차례
         else:
             print("🤖 Stockfish가 생각 중...")
+            
+            # 로봇팔이 연결되어 있고 움직이는 중이면 대기
+            robot_status = get_robot_status()
+            if robot_status['is_connected'] and is_robot_moving():
+                print("🤖 로봇팔이 움직이는 중입니다. 잠시 대기...")
+                while is_robot_moving():
+                    time.sleep(0.5)
+                print("🤖 로봇팔 움직임 완료!")
+            
             if make_stockfish_move():
                 move_count += 1
                 print(f"✅ Stockfish 이동 완료")
@@ -360,13 +432,6 @@ def main():
                     game_over = True
                     break
                 
-                # 모니터링 서버에 이동 정보 업데이트
-                # update_monitor_server(
-                #     last_move="Stockfish",
-                #     move_count=move_count,
-                #     black_timer=get_black_timer(),
-                #     white_timer=get_white_timer()
-                # )
             else:
                 print("❌ Stockfish 이동 실패 - 다음 턴으로 계속 진행")
                 time.sleep(0.5)
@@ -393,5 +458,10 @@ if __name__ == '__main__':
         if timer_manager.is_connected:
             timer_manager.disconnect()
         print("아두이노 타이머 연결을 종료했습니다.")
+        
+        # 로봇팔 연결 해제
+        disconnect_robot_arm()
+        print("로봇팔 연결을 종료했습니다.")
+        
         # 엔진 종료
         shutdown_engine()
