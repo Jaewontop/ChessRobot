@@ -38,6 +38,7 @@ init_board_values = None
 reload_base_board = False
 turn_color = 'white'
 prev_turn_color = 'white'
+player_color = None   # 'white' or 'black' (카메라 아랫변 쪽 플레이어)
 
 # 체스 기물 배열 (행: 0~7, 열: 0~7)
 chess_pieces = [
@@ -54,6 +55,26 @@ chess_pieces = [
 prev_board_values = None
 prev_warp = None
 move_history = []
+
+def _order_corners_tl_tr_br_bl(pts):
+    """
+    4점(pts)을 (Top-Left, Top-Right, Bottom-Right, Bottom-Left) 순서로 정렬해서 반환.
+    pts: iterable of 4 points [[x,y], ...] or np.array shape (4,2)
+    """
+    import numpy as np
+    pts = np.array(pts, dtype=np.float32).reshape(4, 2)
+
+    # 합/차를 이용한 고전적 정렬 방식
+    s = pts.sum(axis=1)          # x + y
+    d = np.diff(pts, axis=1)     # y - x (주의: np.diff along axis=1 returns shape (4,1))
+
+    tl = pts[np.argmin(s)]       # 합이 가장 작음
+    br = pts[np.argmax(s)]       # 합이 가장 큼
+    tr = pts[np.argmin(d)]       # (y-x)가 가장 작음 -> x가 크고 y가 작을 가능성 → 우상단
+    bl = pts[np.argmax(d)]       # (y-x)가 가장 큼  -> x가 작고 y가 클 가능성 → 좌하단
+
+    ordered = np.array([tl, tr, br, bl], dtype=np.float32)
+    return ordered
 
 # =======================
 # 유틸: 좌표 표기/색 판별
@@ -94,13 +115,30 @@ def _mean_lab_board_from_warp(warp):
     return out
 
 def _safe_find_corners(frame):
-    """find_green_corners 시그니처 차이에 안전한 호출"""
+    """
+    find_green_corners 시그니처 차이를 흡수하고,
+    반환된 4점을 TL, TR, BR, BL 순서로 강제 정렬해서 돌려준다.
+    """
+    import numpy as np
+
+    corners = None
     try:
         lower = np.array([Hmin, Smin, Vmin], dtype=np.uint8)
         upper = np.array([Hmax, Smax, Vmax], dtype=np.uint8)
-        return find_green_corners(frame, lower, upper, min_area=60)
+        # 일부 버전은 (frame, lower, upper, min_area=...) 시그니처
+        corners = find_green_corners(frame, lower, upper, min_area=60)
     except TypeError:
-        return find_green_corners(frame)
+        # 다른 버전은 (frame)만 받는 시그니처
+        corners = find_green_corners(frame)
+
+    if corners is not None and len(corners) == 4:
+        try:
+            corners = _order_corners_tl_tr_br_bl(corners)
+        except Exception:
+            # 혹시라도 형상 문제 등으로 정렬 실패 시 원본 유지
+            pass
+
+    return corners
 
 def _capture_avg_lab_board(cap, n_frames=8, sleep_sec=0.02):
     """짧은 시간 n_frames 프레임을 평균해서 LAB 보드값을 안정적으로 산출"""
@@ -206,7 +244,7 @@ def edges_feed():
 @app.route('/piece')
 def piece_feed():
     from piece_recognition import gen_edges_frames as gen_diff_frames
-    return Response(gen_diff_frames(cap, base_board_path=NPPATH, threshold=15),
+    return Response(gen_diff_frames(cap, base_board_path=NPPATH, threshold=15,top_k=2),
                     mimetype='multipart/x-mixed-replace; boundary=frame')
 
 # ---------- 상태 라우트 ----------
