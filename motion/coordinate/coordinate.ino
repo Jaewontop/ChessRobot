@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <RobotArmIK.h> // library 호출
 
 // 체스판 설정
 #define CHESS_BOARD_SIZE 200.0                                     // 체스판 한 변 길이 (mm)
@@ -9,16 +10,25 @@
 #define DEAD_ZONE 100.0
 #define Z_HEIGHT 20.0
 
+
+// 링크 길이 (mm)
+const float L1 = 200.0;
+const float L2 = 180.0;
+
+// 핀 번호 및 링크 길이
+RobotArmIK robotArm(9, 10, 11, 12, 200.0, 180.0); // 객체 생성
+
+
 // 각 칸의 좌표 (로봇팔 구동부 기준, 0,0이 원점, 각 칸의 중점)
 float X[8] = {
-    -(EFFECTIVE_BOARD_SIZE / 2) + SQUARE_SIZE / 2,     // a열: -100mm (중점)
-    -(EFFECTIVE_BOARD_SIZE / 2) + 3 * SQUARE_SIZE / 2, // b열: -80mm (중점)
-    -(EFFECTIVE_BOARD_SIZE / 2) + 5 * SQUARE_SIZE / 2, // c열: -60mm (중점)
-    -(EFFECTIVE_BOARD_SIZE / 2) + 7 * SQUARE_SIZE / 2, // d열: -40mm (중점)
-    (EFFECTIVE_BOARD_SIZE / 2) - 7 * SQUARE_SIZE / 2,  // e열: -20mm (중점)
-    (EFFECTIVE_BOARD_SIZE / 2) - 5 * SQUARE_SIZE / 2,  // f열: 0mm (중점)
-    (EFFECTIVE_BOARD_SIZE / 2) - 3 * SQUARE_SIZE / 2,  // g열: 20mm (중점)
-    (EFFECTIVE_BOARD_SIZE / 2) - SQUARE_SIZE / 2,      // h열: 40mm (중점)
+    -(EFFECTIVE_BOARD_SIZE / 2) + SQUARE_SIZE / 2,
+    -(EFFECTIVE_BOARD_SIZE / 2) + 3 * SQUARE_SIZE / 2,
+    -(EFFECTIVE_BOARD_SIZE / 2) + 5 * SQUARE_SIZE / 2,
+    -(EFFECTIVE_BOARD_SIZE / 2) + 7 * SQUARE_SIZE / 2,
+    (EFFECTIVE_BOARD_SIZE / 2) - 7 * SQUARE_SIZE / 2,
+    (EFFECTIVE_BOARD_SIZE / 2) - 5 * SQUARE_SIZE / 2,
+    (EFFECTIVE_BOARD_SIZE / 2) - 3 * SQUARE_SIZE / 2,
+    (EFFECTIVE_BOARD_SIZE / 2) - SQUARE_SIZE / 2,
 };
 
 float Y[8] = {
@@ -63,31 +73,34 @@ String getMessage()
   return ""; // 메시지가 없으면 빈 문자열 반환
 }
 
-// 체스 기물 이동 함수
-void calculateAndMove(float x, float y, float z)
-{
-  // TODO: 실제 3L_ik.ino에 있는 함수와 연동하기 - 최윤서 할거
-  Serial.print("이동: X=");
-  Serial.print(x);
-  Serial.print(", Y=");
-  Serial.print(y);
-  Serial.print(", Z=");
-  Serial.println(z);
-}
+// // 체스 기물 이동 함수
+// void calculateAndMove(float x, float y, float z)
+// {
+//   // TODO: 실제 3L_ik.ino에 있는 함수와 연동하기 - 최윤서 할거
+//   // 라이브러리 호출하기
+//   Serial.print("이동: X=");
+//   Serial.print(x);
+//   Serial.print(", Y=");
+//   Serial.print(y);
+//   Serial.print(", Z=");
+//   Serial.println(z);
+// }
 
 
-// 그리퍼 제어 함수들
-void gripperClose()
-{
-  // TODO: 그리퍼 닫기 함수 만들기
-  Serial.println("그리퍼 닫기");
-}
+// // 그리퍼 제어 함수들
+// void gripClose()
+// {
+//   // TODO: 그리퍼 닫기 함수 만들기
+//   // 닫고 lower arm 올리는 것까지
+//   Serial.println("그리퍼 닫기");
+// }
 
-void gripperOpen()
-{
-  // TODO: 그리퍼 열기 함수 만들기
-  Serial.println("그리퍼 열기");
-}
+// void gripOpen()
+// {
+//   // TODO: 그리퍼 열기 함수 만들기
+//   // 열고 lower arm 올리는 것까지
+//   Serial.println("그리퍼 열기");
+// }
 
 // 체스 표기법을 좌표로 변환하는 함수
 void chessToCoordinates(String chessPos, float &x, float &y)
@@ -139,6 +152,7 @@ void chessToCoordinates(String chessPos, float &x, float &y)
 void setup()
 {
   Serial.begin(9600);
+  robotArm.begin();
 
   // 좌표 매핑 초기화
   for (int i = 0; i < 8; i++)
@@ -165,13 +179,14 @@ void setup()
   Serial.println("mm");
 
   // READY 상태로 초기화
-  calculateAndMove(0, 0, 60);
+  robotArm.moveTo(0, 0, 60);
+  delay(2000);
 }
 
 void loop()
 {
   // 라즈베리파이로부터 메시지 수신
-  message = getMessage();
+  String message = getMessage();
 
   if (message.length() > 0)
   {
@@ -214,19 +229,23 @@ void processCapture(String capturePos)
   Serial.println(")");
 
   // 1. 캡처할 위치로 이동 (Z=20으로 고정)
-  calculateAndMove(x, y, Z_HEIGHT);
+  robotArm.moveTo(x, y, Z_HEIGHT);
+  delay(2000);
 
   // 2. 그리퍼로 잡기
-  gripperClose();
+  robotArm.gripClose();
+  delay(2000);
 
   // 3. DEAD_ZONE으로 이동
-  calculateAndMove(DEAD_ZONE, DEAD_ZONE, DEAD_ZONE);
+  robotArm.moveTo(DEAD_ZONE, DEAD_ZONE, DEAD_ZONE);
 
   // 4. 그리퍼 열기
-  gripperOpen();
+  robotArm.gripOpen();
+  delay(2000);
 
-  // 5. READY 상태로 돌아가기 (0,0,0)
-  calculateAndMove(0, 0, 0);
+  // // 5. READY 상태로 돌아가기 (0,0,0) 이 코드 굳이 필요한가
+  // robotArm.moveTo(0, 0, 0);
+  // delay(2000); 
 
   // 라즈베리파이로 완료 신호 전송
   Serial.println("CAPTURE_COMPLETE");
@@ -267,22 +286,28 @@ void processChessMove(String move)
   Serial.println(")");
 
   // 1. 시작 위치로 이동 (Z=20으로 고정)
-  calculateAndMove(startX, startY, Z_HEIGHT);
+  robotArm.moveTo(startX, startY, Z_HEIGHT);
+  delay(2000);
 
   // 2. 그리퍼로 잡기
-  gripperClose();
+  robotArm.gripClose();
+  delay(2000);
 
   // 3. DEAD_ZONE으로 이동
-  calculateAndMove(DEAD_ZONE, DEAD_ZONE, DEAD_ZONE);
+  robotArm.moveTo(DEAD_ZONE, DEAD_ZONE, DEAD_ZONE);
+  delay(2000);
 
   // 4. 끝 위치로 이동
-  calculateAndMove(endX, endY, Z_HEIGHT);
+  robotArm.moveTo(endX, endY, Z_HEIGHT);
+  delay(2000);
 
   // 5. 그리퍼 열기
-  gripperOpen();
+  robotArm.gripOpen();
+  delay(2000);
 
-  // 6. READY 상태로 돌아가기 (0,0,0)
-  calculateAndMove(0, 0, 0);
+  // // 6. READY 상태로 돌아가기 (0,0,0) 이거 굳이 필요한가?
+  // robotArm.moveTo(0, 0, 0);
+  // delay(2000);
 
   Serial.println("이동 완료!");
 

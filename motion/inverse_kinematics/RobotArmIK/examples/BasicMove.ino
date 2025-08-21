@@ -1,11 +1,6 @@
 #include <RobotArmIK.h>
 
-// 링크 길이 (mm)
-const float L1 = 200.0;
-const float L2 = 180.0;
-
-// 핀 번호 (아두이노 핀 번호에 맞게 수정)
-RobotArmIK robotArm(9, 10, 11, L1, L2);
+RobotArmIK robotArm(9, 10, 11, 12, 200.0, 180.0);  // 12번 핀: 그리퍼
 
 void setup() {
   Serial.begin(9600);
@@ -13,8 +8,12 @@ void setup() {
 }
 
 void loop() {
-  robotArm.moveTo(150, 50, 100);  
+  robotArm.moveTo(150, 50, 100);
   delay(2000);
-  robotArm.moveTo(200, 0, 50);
+
+  robotArm.gripOpen();   // 그리퍼 열기
+  delay(1000);
+
+  robotArm.gripClose();  // 그리퍼 닫기
   delay(2000);
 }
