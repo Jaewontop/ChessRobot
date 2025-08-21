@@ -119,7 +119,7 @@ void chessToCoordinates(String chessPos, float &x, float &y)
   int colIndex = -1;
   for (int i = 0; i < 8; i++)
   {
-    if (rows[i] == col)
+    if (rows[i] == col) // 열이라면서 행을 적어놓은 거 실화냐 ㅋㅋㅋㅋㅋ
     {
       colIndex = i;
       break;
@@ -210,6 +210,8 @@ void loop()
 
     received = false; // 처리 완료
   }
+
+  turnOver(); // 차례 종료
 }
 
 // 캡처 처리 함수
@@ -313,4 +315,11 @@ void processChessMove(String move)
 
   // 라즈베리파이로 완료 신호 전송
   Serial.println("MOVE_COMPLETE");
+}
+
+// 차례 종료하는 함수
+void turnOver() {
+  
+  robotArm.moveTo(100,100,20); // 타이머 위치 임의 지정
+  delay(2000);
 }
