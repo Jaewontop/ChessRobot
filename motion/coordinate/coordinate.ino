@@ -1,22 +1,34 @@
-#include <Arduino.h>
-#include <RobotArmIK.h> // library 호출
+#include <Wire.h>
+#include <Adafruit_PWMServoDriver.h>
+#include "RobotArmIK.h" // 수정된 라이브러리 호출
 
-// 체스판 설정
-#define CHESS_BOARD_SIZE 200.0                                     // 체스판 한 변 길이 (mm)
-#define BOARD_MARGIN 20.0                                          // 체스판 한쪽 모서리 마진 (mm)
-#define EFFECTIVE_BOARD_SIZE (CHESS_BOARD_SIZE - 2 * BOARD_MARGIN) // 실제 체스판 크기 (160mm)
-#define SQUARE_SIZE (EFFECTIVE_BOARD_SIZE / 8.0)                   // 한 칸의 크기 (20mm)
-#define ROBOT_ARM_OFFSET 30.0                                      // 로봇팔 부피로 인한 실제 구동부 거리 (mm)
-#define DEAD_ZONE 100.0
-#define Z_HEIGHT 20.0
-
+// --- 설정값 ---
+// 서보 드라이버 채널 번호 (0부터 15까지)
+#define SHOULDER_CHANNEL 0
+#define UPPER_ARM_CHANNEL 1
+#define LOWER_ARM_CHANNEL 2
+#define GRIP_CHANNEL 3
 
 // 링크 길이 (mm)
 const float L1 = 200.0;
 const float L2 = 180.0;
 
-// 핀 번호 및 링크 길이
-RobotArmIK robotArm(9, 10, 11, 12, 200.0, 180.0); // 객체 생성
+// 체스판 설정
+#define CHESS_BOARD_SIZE 200.0       // 체스판 한 변 길이 (mm)
+#define BOARD_MARGIN 20.0            // 체스판 한쪽 모서리 마진 (mm)
+#define EFFECTIVE_BOARD_SIZE (CHESS_BOARD_SIZE - 2 * BOARD_MARGIN) // 실제 체스판 크기 (160mm)
+#define SQUARE_SIZE (EFFECTIVE_BOARD_SIZE / 8.0) // 한 칸의 크기 (20mm)
+#define ROBOT_ARM_OFFSET 30.0        // 로봇팔 중심과 체스판 시작점 사이의 거리 (mm)
+#define DEAD_ZONE 100.0              // 잡은 말을 놓는 구역의 좌표
+#define Z_HEIGHT 20.0                // 말을 잡거나 놓을 때의 Z축 높이
+
+
+// --- 객체 생성 ---
+// 1. 서보 드라이버 객체 생성
+Adafruit_PWMServoDriver pwm = Adafruit_PWMServoDriver();
+
+// 2. RobotArmIK 객체 생성 (핀 번호 대신 채널 번호와 드라이버 객체의 주소(&pwm)를 전달)
+RobotArmIK robotArm(&pwm, SHOULDER_CHANNEL, UPPER_ARM_CHANNEL, LOWER_ARM_CHANNEL, GRIP_CHANNEL, L1, L2);
 
 
 // 각 칸의 좌표 (로봇팔 구동부 기준, 0,0이 원점, 각 칸의 중점)
@@ -73,34 +85,6 @@ String getMessage()
   return ""; // 메시지가 없으면 빈 문자열 반환
 }
 
-// // 체스 기물 이동 함수
-// void calculateAndMove(float x, float y, float z)
-// {
-//   // TODO: 실제 3L_ik.ino에 있는 함수와 연동하기 - 최윤서 할거
-//   // 라이브러리 호출하기
-//   Serial.print("이동: X=");
-//   Serial.print(x);
-//   Serial.print(", Y=");
-//   Serial.print(y);
-//   Serial.print(", Z=");
-//   Serial.println(z);
-// }
-
-
-// // 그리퍼 제어 함수들
-// void gripClose()
-// {
-//   // TODO: 그리퍼 닫기 함수 만들기
-//   // 닫고 lower arm 올리는 것까지
-//   Serial.println("그리퍼 닫기");
-// }
-
-// void gripOpen()
-// {
-//   // TODO: 그리퍼 열기 함수 만들기
-//   // 열고 lower arm 올리는 것까지
-//   Serial.println("그리퍼 열기");
-// }
 
 // 체스 표기법을 좌표로 변환하는 함수
 void chessToCoordinates(String chessPos, float &x, float &y)
@@ -152,7 +136,13 @@ void chessToCoordinates(String chessPos, float &x, float &y)
 void setup()
 {
   Serial.begin(9600);
-  robotArm.begin();
+
+  // 서보 드라이버 초기화
+  pwm.begin();
+  pwm.setOscillatorFrequency(27000000);
+  pwm.setPWMFreq(50); // 서보 모터는 50Hz
+
+  // robotArm.begin(); // 라이브러리의 begin()은 현재 비어있으므로 생략 가능
 
   // 좌표 매핑 초기화
   for (int i = 0; i < 8; i++)
@@ -177,10 +167,11 @@ void setup()
   Serial.print("데드존: ");
   Serial.print(DEAD_ZONE);
   Serial.println("mm");
-
-  // READY 상태로 초기화
-  robotArm.moveTo(0, 0, 60);
+  
+  // 시작 준비 자세로 이동
+  robotArm.moveTo(0, 0, 60); // 예시: x=150, y=0, z=100
   delay(2000);
+
 }
 
 void loop()
@@ -245,9 +236,6 @@ void processCapture(String capturePos)
   robotArm.gripOpen();
   delay(2000);
 
-  // // 5. READY 상태로 돌아가기 (0,0,0) 이 코드 굳이 필요한가
-  // robotArm.moveTo(0, 0, 0);
-  // delay(2000); 
 
   // 라즈베리파이로 완료 신호 전송
   Serial.println("CAPTURE_COMPLETE");
@@ -307,9 +295,6 @@ void processChessMove(String move)
   robotArm.gripOpen();
   delay(2000);
 
-  // // 6. READY 상태로 돌아가기 (0,0,0) 이거 굳이 필요한가?
-  // robotArm.moveTo(0, 0, 0);
-  // delay(2000);
 
   Serial.println("이동 완료!");
 
