@@ -238,7 +238,7 @@ void processCapture(String capturePos)
 
 
   // 라즈베리파이로 완료 신호 전송
-  Serial.println("CAPTURE_COMPLETE");
+  Serial.println("MOVE_COMPLETE");
 }
 
 // 체스 기물 이동 처리 함수
