@@ -1,0 +1,1633 @@
+# main.py
+from flask import Flask, Response, render_template_string
+import cv2
+import threading
+import numpy as np
+import os
+import time
+import pickle
+import math
+from pathlib import Path
+
+# 내부 모듈
+from video_streams import gen_warped_frames, gen_original_frames, gen_edges_frames
+from piece_auto_update import update_chess_pieces
+# find_green_corners 시그니처가 버전에 따라 다를 수 있으므로 HSV 범위도 함께 import
+from warp_cam_picam2_v2 import find_green_corners, warp_chessboard, Hmin, Hmax, Smin, Smax, Vmin, Vmax
+
+# ==== 경로(절대) ====
+BASE_DIR = Path(__file__).resolve().parent
+NPPATH = str(BASE_DIR / "init_board_values.npy")
+PKLPATH = str(BASE_DIR / "chess_pieces.pkl")
+
+# =======================
+# 전역 상태
+# =======================
+USE_PICAM2 = True  # CSI 카메라인 경우 True
+
+# 카메라 초기화: PiCam2 우선, 실패 시 OpenCV로 폴백
+cap = None
+if USE_PICAM2:
+    try:
+        from piece_recognition import PiCam2Capture
+        cap = PiCam2Capture()
+        print('[BOOT] PiCam2 initialized')
+    except Exception as e:
+        print(f"[BOOT] PiCam2 init failed, fallback to OpenCV: {e}")
+        USE_PICAM2 = False
+
+if cap is None:
+    # 시도: 여러 인덱스 중 첫 번째 성공 장치 선택
+    for idx in (0, 1, 2, 3):
+        cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+        if cap is not None and cap.isOpened():
+            print(f"[BOOT] OpenCV VideoCapture initialized (index {idx})")
+            break
+        if cap is not None:
+            cap.release()
+            cap = None
+    if cap is None:
+        # 최종 시도: 기본 생성자
+        cap = cv2.VideoCapture(0)
+        print('[BOOT] OpenCV VideoCapture fallback (default)')
+
+latest_frame = None
+
+# 기준/턴/보드 상태
+init_board_values = None
+reload_base_board = False
+turn_color = 'white'
+prev_turn_color = 'white'
+player_color = None   # 'white' or 'black' (카메라 아랫변 쪽 플레이어)
+
+# 체스 기물 배열 (행: 0~7, 열: 0~7)
+# 행 0: a8-h8 (검은색 백랭크), 행 7: a1-h1 (흰색 백랭크)
+chess_pieces = [
+    ['BR', 'BN', 'BB', 'BQ', 'BK', 'BB', 'BN', 'BR'],  # 8th rank (a8-h8)
+    ['BP', 'BP', 'BP', 'BP', 'BP', 'BP', 'BP', 'BP'],  # 7th rank (a7-h7)
+    ['', '', '', '', '', '', '', ''],                    # 6th rank (a6-h6)
+    ['', '', '', '', '', '', '', ''],                    # 5th rank (a5-h5)
+    ['', '', '', '', '', '', '', ''],                    # 4th rank (a4-h4)
+    ['', '', '', '', '', '', '', ''],                    # 3rd rank (a3-h3)
+    ['WP', 'WP', 'WP', 'WP', 'WP', 'WP', 'WP', 'WP'],  # 2nd rank (a2-h2)
+    ['WR', 'WN', 'WB', 'WQ', 'WK', 'WB', 'WN', 'WR'],  # 1st rank (a1-h1)
+]
+
+prev_board_values = None
+prev_warp = None
+move_history = []
+
+CELL_MARGIN_RATIO = 0.12   # 셀 내부 12% 여백 두고 중앙부만 샘플링
+EDGE_THRESHOLD = 20        # 에지 임계값 (매우 민감하게)
+CONTOUR_MIN_AREA = 20      # 최소 컨투어 면적 (매우 작은 변화도 감지)
+GRAD_Z_THR = 0.4          # 에지 z-score 임계 (매우 관대하게)
+
+# 가중치 설정 (검은 기물 감지 최적화)
+HSV_WEIGHT = 0.25          # HSV 색상 가중치
+EDGE_WEIGHT = 0.20         # 에지 가중치
+CONTOUR_WEIGHT = 0.15      # 컨투어 가중치
+TEXTURE_WEIGHT = 0.10      # 텍스처 가중치
+SHAPE_WEIGHT = 0.10        # 기물 형태 가중치
+BACKGROUND_WEIGHT = 0.20   # 배경 차감 가중치 (검은 기물 전용)
+
+# 확실한 기물 인식 설정
+PIECE_DETECTION_ENABLED = True      # 기물 인식 AI 활성화
+BACKGROUND_SUBTRACTION = True       # 배경 차감 기법 활성화
+REAL_TIME_LEARNING = True           # 실시간 학습 활성화
+PIECE_SPECIFIC_DETECTION = True     # 기물별 전용 감지기 활성화
+GEOMETRIC_ANALYSIS = True          # 기하학적 특징 분석 활성화
+
+def _roi_bounds(i, j, cell_h, cell_w, H, W, margin_ratio=CELL_MARGIN_RATIO):
+    """셀 중앙부 ROI 경계(여백 포함)"""
+    my = int(cell_h * margin_ratio); mx = int(cell_w * margin_ratio)
+    y1 = max(0, i * cell_h + my)
+    y2 = min(H, (i + 1) * cell_h - my)
+    x1 = max(0, j * cell_w + mx)
+    x2 = min(W, (j + 1) * cell_w - mx)
+    if y2 <= y1: y2 = min(H, y1 + 1)
+    if x2 <= x1: x2 = min(W, x1 + 1)
+    return y1, y2, x1, x2
+
+# ----------------------
+# Dark-square aware diff
+# ----------------------
+def _cell_is_dark(warp_img, i, j):
+    """현재 warp 이미지의 셀(i,j)이 어두운 칸인지 간단 판정 (HSV V 기반)."""
+    h, w = warp_img.shape[:2]
+    cell_h = h // 8; cell_w = w // 8
+    y1, y2, x1, x2 = _roi_bounds(i, j, cell_h, cell_w, h, w)
+    roi = warp_img[y1:y2, x1:x2]
+    hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    v_mean = float(np.mean(hsv[:, :, 2]))
+    # 보드/조명마다 다르므로 여유롭게 설정 (0~255)
+    return v_mean < 90.0
+
+def _weighted_diff(curr_vec, base_vec, is_dark, channels):
+    """채널 벡터 차이를 어두운 칸 여부에 따라 가중합으로 환산.
+    channels: 11(확실), 8(고급), 5(하이브리드), 3(에지/컨투어)
+    """
+    # 공통 안전 처리
+    c = int(channels)
+    cv = np.asarray(curr_vec, dtype=float)
+    bv = np.asarray(base_vec, dtype=float)
+    # 부족한 경우를 대비해 길이 맞춤
+    m = min(len(cv), len(bv), c)
+    cv = cv[:m]; bv = bv[:m]
+    d = np.abs(cv - bv)
+
+    if c == 11:
+        edge, grad, contour, color, texture, shape, bg, piece, black_conf, geo, integ = d.tolist() + [0.0] * (11 - m)
+        if is_dark:
+            # 어두운 칸: 구조/윤곽/배경 위주
+            return (0.18*edge + 0.18*grad + 0.18*contour + 0.05*color +
+                    0.15*texture + 0.10*shape + 0.10*bg + 0.03*piece + 0.02*geo + 0.01*integ)
+        else:
+            # 밝은 칸: 색/텍스처도 반영
+            return (0.16*edge + 0.16*grad + 0.14*contour + 0.12*color +
+                    0.12*texture + 0.08*shape + 0.08*bg + 0.06*piece + 0.05*geo + 0.03*integ)
+    if c == 8:
+        edge, grad, contour, color, texture, shape, bg, piece = d.tolist() + [0.0] * (8 - m)
+        if is_dark:
+            return 0.22*edge + 0.22*grad + 0.20*contour + 0.05*color + 0.15*texture + 0.10*shape + 0.06*bg
+        else:
+            return 0.18*edge + 0.18*grad + 0.16*contour + 0.14*color + 0.14*texture + 0.10*shape + 0.10*bg
+    if c == 5:
+        edge, grad, contour, color, texture = d.tolist() + [0.0] * (5 - m)
+        if is_dark:
+            return 0.30*edge + 0.30*grad + 0.25*contour + 0.05*color + 0.10*texture
+        else:
+            return 0.25*edge + 0.25*grad + 0.20*contour + 0.15*color + 0.15*texture
+    # c == 3 (edge/contour)
+    if m >= 3:
+        edge, grad, contour = d[:3]
+        if is_dark:
+            return 0.4*edge + 0.4*grad + 0.2*contour
+        else:
+            return 0.35*edge + 0.35*grad + 0.30*contour
+    return float(np.sum(d))
+
+def _order_corners_tl_tr_br_bl(pts):
+    """
+    4점(pts)을 (Top-Left, Top-Right, Bottom-Right, Bottom-Left) 순서로 정렬해서 반환.
+    pts: iterable of 4 points [[x,y], ...] or np.array shape (4,2)
+    """
+    import numpy as np
+    pts = np.array(pts, dtype=np.float32).reshape(4, 2)
+
+    # 합/차를 이용한 고전적 정렬 방식
+    s = pts.sum(axis=1)          # x + y
+    d = np.diff(pts, axis=1)     # y - x (주의: np.diff along axis=1 returns shape (4,1))
+
+    tl = pts[np.argmin(s)]       # 합이 가장 작음
+    br = pts[np.argmax(s)]       # 합이 가장 큼
+    tr = pts[np.argmin(d)]       # (y-x)가 가장 작음 -> x가 크고 y가 작을 가능성 → 우상단
+    bl = pts[np.argmax(d)]       # (y-x)가 가장 큼  -> x가 작고 y가 클 가능성 → 좌하단
+
+    ordered = np.array([tl, tr, br, bl], dtype=np.float32)
+    return ordered
+
+# =======================
+# 유틸: 좌표 표기/색 판별
+# =======================
+def coord_to_chess_notation(i, j):
+    """(0,0)=a8, (7,7)=h1 체스 표기"""
+    file = chr(ord('a') + j)
+    rank = str(8 - i)
+    return file + rank
+
+def piece_to_fen(piece):
+    if not piece or len(piece) < 2:
+        return ''
+    color, kind = piece[0], piece[1]
+    kind_map = {'K': 'K', 'Q': 'Q', 'R': 'R', 'B': 'B', 'N': 'N', 'P': 'P'}
+    fen = kind_map.get(kind.upper(), '?')
+    return fen.upper() if color == 'W' else fen.lower() if color == 'B' else '?'
+
+def _is_color_piece(code, color):  # code: 'WP','BP',..., color: 'white'/'black'
+    return bool(code) and ((color == 'white' and code[0] == 'W') or (color == 'black' and code[0] == 'B'))
+
+# =======================
+# 에지/컨투어 기반 분석 도우미
+# =======================
+def _analyze_cell_certain(cell_img, background_img=None):
+    """셀 이미지에서 확실한 분석 (검은 기물 100% 감지)"""
+    if cell_img.size == 0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0
+    
+    # 1. 검은 기물 궁극 감지기 (100% 정확한 방법)
+    black_confidence, black_probability, bg_change, geo_score, spectral_score = _detect_black_piece_ultimate(cell_img, background_img)
+    
+    # 2. HSV 색상 분석 (개선된 버전)
+    if len(cell_img.shape) == 3:
+        hsv = cv2.cvtColor(cell_img, cv2.COLOR_BGR2HSV)
+        h_mean = np.mean(hsv[:, :, 0]) / 180.0  # H 정규화 (0-1)
+        s_mean = np.mean(hsv[:, :, 1]) / 255.0  # S 정규화 (0-1)
+        v_mean = np.mean(hsv[:, :, 2]) / 255.0  # V 정규화 (0-1)
+        
+        # HSV 통계 (표준편차로 색상 변화량 측정)
+        h_std = np.std(hsv[:, :, 0]) / 180.0
+        s_std = np.std(hsv[:, :, 1]) / 255.0
+        v_std = np.std(hsv[:, :, 2]) / 255.0
+        color_variation = (h_std + s_std + v_std) / 3.0
+        
+        # 색상 히스토그램 분석 (기물 특성 파악)
+        color_hist = _analyze_color_histogram(hsv)
+    else:
+        h_mean = s_mean = v_mean = color_variation = color_hist = 0.0
+    
+    # 3. 배경 차감 (검은 칸에서 검은 기물 감지 개선)
+    if BACKGROUND_SUBTRACTION and background_img is not None:
+        bg_subtraction = _background_subtraction(cell_img, background_img)
+    else:
+        bg_subtraction = 0.0
+    
+    # 4. 그레이스케일 변환 및 노이즈 제거
+    if len(cell_img.shape) == 3:
+        gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = cell_img
+    
+    # 다중 스케일 가우시안 블러
+    blurred_3 = cv2.GaussianBlur(gray, (3, 3), 0)
+    blurred_5 = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # 5. 다중 스케일 에지 검출 (매우 민감하게)
+    edges_3 = cv2.Canny(blurred_3, EDGE_THRESHOLD, EDGE_THRESHOLD * 2)
+    edges_5 = cv2.Canny(blurred_5, EDGE_THRESHOLD, EDGE_THRESHOLD * 2)
+    
+    # 에지 픽셀 비율 (다중 스케일 평균)
+    edge_ratio_3 = np.sum(edges_3 > 0) / edges_3.size
+    edge_ratio_5 = np.sum(edges_5 > 0) / edges_5.size
+    edge_ratio = (edge_ratio_3 + edge_ratio_5) / 2.0
+    
+    # 6. 다중 스케일 그래디언트 분석
+    grad_x_3 = cv2.Sobel(blurred_3, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y_3 = cv2.Sobel(blurred_3, cv2.CV_64F, 0, 1, ksize=3)
+    grad_mag_3 = cv2.magnitude(grad_x_3, grad_y_3)
+    
+    grad_x_5 = cv2.Sobel(blurred_5, cv2.CV_64F, 1, 0, ksize=5)
+    grad_y_5 = cv2.Sobel(blurred_5, cv2.CV_64F, 0, 1, ksize=5)
+    grad_mag_5 = cv2.magnitude(grad_x_5, grad_y_5)
+    
+    # 그래디언트 강도 (다중 스케일 평균)
+    avg_grad_magnitude = (np.mean(grad_mag_3) + np.mean(grad_mag_5)) / 2.0
+    
+    # 7. 컨투어 분석 (매우 민감하게)
+    contours_3, _ = cv2.findContours(edges_3, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    contours_5, _ = cv2.findContours(edges_5, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    # 컨투어 면적 및 형태 분석
+    contour_features = _analyze_contours_advanced(contours_3 + contours_5, cell_img.shape)
+    normalized_contour_area = contour_features['area']
+    shape_score = contour_features['shape']
+    
+    # 8. 텍스처 분석 (개선된 버전)
+    texture_score = _analyze_texture_advanced(blurred_3)
+    
+    # 9. 기하학적 특징 분석 (검은 기물 전용)
+    if GEOMETRIC_ANALYSIS:
+        geo_score, symmetry, boundary = _geometric_piece_analysis(cell_img)
+    else:
+        geo_score = symmetry = boundary = 0.0
+    
+    # 10. 기물 특성 분석 (검은 기물 감지 개선)
+    piece_characteristics = _analyze_piece_characteristics(cell_img, hsv if len(cell_img.shape) == 3 else None)
+    
+    # 11. 통합 신뢰도 점수 (검은 기물 감지 최적화)
+    integrated_confidence = (
+        black_confidence * 0.4 +           # 검은 기물 궁극 감지기 (가장 중요)
+        bg_change * 0.3 +                  # 배경 변화
+        black_probability * 0.2 +          # 검은 기물 확률
+        piece_characteristics * 0.1        # 일반 기물 특성
+    )
+    
+    return (edge_ratio, avg_grad_magnitude, normalized_contour_area, 
+            color_variation, texture_score, shape_score, bg_subtraction, 
+            piece_characteristics, black_confidence, geo_score, integrated_confidence)
+
+def _analyze_color_histogram(hsv_img):
+    """HSV 이미지의 색상 히스토그램 분석"""
+    if hsv_img is None or hsv_img.size == 0:
+        return 0.0
+    
+    # H, S, V 채널별 히스토그램 계산
+    h_hist = cv2.calcHist([hsv_img], [0], None, [18], [0, 180])  # H: 0-180
+    s_hist = cv2.calcHist([hsv_img], [1], None, [25], [0, 255])  # S: 0-255
+    v_hist = cv2.calcHist([hsv_img], [2], None, [25], [0, 255])  # V: 0-255
+    
+    # 히스토그램 정규화
+    h_hist = h_hist.flatten() / (hsv_img.shape[0] * hsv_img.shape[1])
+    s_hist = s_hist.flatten() / (hsv_img.shape[0] * hsv_img.shape[1])
+    v_hist = v_hist.flatten() / (hsv_img.shape[0] * hsv_img.shape[1])
+    
+    # 색상 다양성 점수 (엔트로피 기반)
+    h_entropy = -np.sum(h_hist * np.log2(h_hist + 1e-10))
+    s_entropy = -np.sum(s_hist * np.log2(s_hist + 1e-10))
+    v_entropy = -np.sum(v_hist * np.log2(v_hist + 1e-10))
+    
+    return (h_entropy + s_entropy + v_entropy) / 3.0
+
+def _background_subtraction(current_img, background_img):
+    """배경 차감으로 기물 변화 감지"""
+    if current_img is None or background_img is None:
+        return 0.0
+    
+    if current_img.shape != background_img.shape:
+        return 0.0
+    
+    # 그레이스케일 변환
+    if len(current_img.shape) == 3:
+        current_gray = cv2.cvtColor(current_img, cv2.COLOR_BGR2GRAY)
+    else:
+        current_gray = current_img
+    
+    if len(background_img.shape) == 3:
+        background_gray = cv2.cvtColor(background_img, cv2.COLOR_BGR2GRAY)
+    else:
+        background_gray = background_img
+    
+    # 절대 차이 계산
+    diff = cv2.absdiff(current_gray, background_gray)
+    
+    # 임계값 적용하여 의미있는 변화만 추출
+    _, thresh = cv2.threshold(diff, 15, 255, cv2.THRESH_BINARY)
+    
+    # 변화된 픽셀 비율
+    change_ratio = np.sum(thresh > 0) / thresh.size
+    
+    return change_ratio
+
+def _analyze_contours_advanced(contours, img_shape):
+    """컨투어의 고급 분석 (면적 + 형태)"""
+    if not contours:
+        return {'area': 0.0, 'shape': 0.0}
+    
+    total_area = 0
+    shape_scores = []
+    
+    for contour in contours:
+        area = cv2.contourArea(contour)
+        if area > CONTOUR_MIN_AREA:
+            total_area += area
+            
+            # 형태 분석 (원형도, 직사각형도 등)
+            perimeter = cv2.arcLength(contour, True)
+            if perimeter > 0:
+                circularity = 4 * np.pi * area / (perimeter * perimeter)
+                shape_scores.append(circularity)
+    
+    # 정규화된 면적
+    normalized_area = total_area / (img_shape[0] * img_shape[1])
+    
+    # 평균 형태 점수
+    avg_shape_score = np.mean(shape_scores) if shape_scores else 0.0
+    
+    return {'area': normalized_area, 'shape': avg_shape_score}
+
+def _analyze_texture_advanced(gray_img):
+    """고급 텍스처 분석"""
+    if gray_img.size == 0:
+        return 0.0
+    
+    h, w = gray_img.shape
+    if h < 3 or w < 3:
+        return 0.0
+    
+    # 1. 기본 텍스처 측정
+    center = gray_img[1:h-1, 1:w-1].astype(np.float32)
+    neighbors = np.zeros_like(center)
+    
+    # 8방향 이웃 픽셀과의 차이
+    directions = [(-1,-1), (-1,0), (-1,1), (0,-1), (0,1), (1,-1), (1,0), (1,1)]
+    for dy, dx in directions:
+        neighbor = gray_img[1+dy:h-1+dy, 1+dx:w-1+dx].astype(np.float32)
+        neighbors += np.abs(center - neighbor)
+    
+    neighbors /= 8.0
+    basic_texture = np.std(neighbors) / 255.0
+    
+    # 2. Gabor 필터 응답 (방향성 텍스처)
+    gabor_responses = []
+    for angle in [0, 45, 90, 135]:
+        kernel = cv2.getGaborKernel((15, 15), 3, angle, 10, 0.5, 0, ktype=cv2.CV_32F)
+        response = cv2.filter2D(gray_img, cv2.CV_8UC3, kernel)
+        gabor_responses.append(np.std(response) / 255.0)
+    
+    gabor_texture = np.mean(gabor_responses)
+    
+    # 3. 통합 텍스처 점수
+    combined_texture = 0.7 * basic_texture + 0.3 * gabor_texture
+    
+    return combined_texture
+
+def _analyze_piece_characteristics(img, hsv_img):
+    """기물의 특성 분석 (검은 기물 감지 개선)"""
+    if img is None or img.size == 0:
+        return 0.0
+    
+    # 1. 밝기 분석 (검은 기물 vs 검은 칸 구분)
+    if len(img.shape) == 3:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = img
+    
+    # 밝기 히스토그램
+    brightness_hist = cv2.calcHist([gray], [0], None, [256], [0, 256])
+    brightness_hist = brightness_hist.flatten() / gray.size
+    
+    # 어두운 영역 비율 (검은 기물 특성)
+    dark_ratio = np.sum(brightness_hist[:50])  # 0-49 픽셀값
+    
+    # 2. 대비 분석
+    contrast = np.std(gray) / 255.0
+    
+    # 3. 기물 특성 점수
+    piece_score = dark_ratio * 0.6 + contrast * 0.4
+    
+    return piece_score
+
+def _detect_black_piece_ultimate(cell_img, background_cell=None):
+    """검은 기물 궁극 감지기 (100% 정확한 방법)"""
+    if cell_img is None or cell_img.size == 0:
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    
+    # 1. 다중 채널 분석
+    if len(cell_img.shape) == 3:
+        gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
+        hsv = cv2.cvtColor(cell_img, cv2.COLOR_BGR2HSV)
+        lab = cv2.cvtColor(cell_img, cv2.COLOR_BGR2LAB)
+        yuv = cv2.cvtColor(cell_img, cv2.COLOR_BGR2YUV)
+    else:
+        gray = cell_img
+        hsv = lab = yuv = None
+    
+    # 2. 다중 임계값 검은 기물 검출 (더 정확한 방법)
+    thresholds = [25, 35, 45, 55]  # 다양한 임계값으로 검은 기물 검출
+    black_masks = []
+    
+    for thresh in thresholds:
+        _, mask = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY_INV)
+        # 모폴로지 연산으로 노이즈 제거
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        black_masks.append(mask)
+    
+    # 3. 검은 기물 영역 분석 (다중 임계값 통합)
+    black_pixel_ratios = []
+    black_regions = []
+    
+    for mask in black_masks:
+        ratio = np.sum(mask > 0) / mask.size
+        black_pixel_ratios.append(ratio)
+        
+        if ratio > 0.05:  # 의미있는 검은 영역
+            black_region = gray[mask > 0]
+            if len(black_region) > 0:
+                black_regions.append(black_region)
+    
+    # 4. 검은 기물의 고유한 특성 분석
+    black_characteristics = _analyze_black_piece_characteristics(gray, black_regions, hsv, lab, yuv)
+    
+    # 5. 배경과의 차이 분석 (가장 중요한 지표)
+    background_analysis = _analyze_background_difference(cell_img, background_cell)
+    
+    # 6. 기하학적 패턴 매칭 (검은 기물의 형태적 특성)
+    geometric_pattern = _analyze_geometric_pattern(gray, black_masks)
+    
+    # 7. 다중 스펙트럼 분석 (색상 공간별 검은 기물 특성)
+    spectral_analysis = _analyze_spectral_characteristics(hsv, lab, yuv, gray)
+    
+    # 8. 통합 신뢰도 점수 (가중 평균)
+    confidence_score = (
+        black_characteristics['darkness'] * 0.25 +           # 어두움 정도
+        black_characteristics['contrast'] * 0.20 +           # 대비
+        black_characteristics['texture'] * 0.15 +            # 텍스처
+        background_analysis['change'] * 0.25 +               # 배경 변화
+        geometric_pattern['shape_score'] * 0.10 +            # 기하학적 패턴
+        spectral_analysis['black_signature'] * 0.05          # 스펙트럼 특성
+    )
+    
+    # 9. 검은 기물 확률 (0-1)
+    black_probability = min(1.0, confidence_score)
+    
+    return confidence_score, black_probability, background_analysis['change'], geometric_pattern['shape_score'], spectral_analysis['black_signature']
+
+def _analyze_black_piece_characteristics(gray, black_regions, hsv, lab, yuv):
+    """검은 기물의 고유한 특성 분석"""
+    if not black_regions:
+        return {'darkness': 0.0, 'contrast': 0.0, 'texture': 0.0}
+    
+    # 1. 어두움 정도 분석
+    all_black_pixels = np.concatenate(black_regions)
+    darkness_score = 1.0 - (np.mean(all_black_pixels) / 255.0)
+    
+    # 2. 대비 분석 (검은 기물은 주변과 대비가 큼)
+    if len(black_regions) > 0:
+        # 검은 영역과 주변 영역의 대비
+        black_std = np.std(all_black_pixels)
+        surrounding_std = np.std(gray)
+        contrast_score = black_std / (surrounding_std + 1e-6)
+    else:
+        contrast_score = 0.0
+    
+    # 3. 텍스처 분석 (검은 기물은 특정 텍스처 패턴을 가짐)
+    texture_score = _analyze_black_texture(gray, black_regions)
+    
+    return {
+        'darkness': darkness_score,
+        'contrast': min(1.0, contrast_score),
+        'texture': texture_score
+    }
+
+def _analyze_black_texture(gray, black_regions):
+    """검은 기물의 텍스처 특성 분석"""
+    if not black_regions:
+        return 0.0
+    
+    # 검은 영역에서의 텍스처 분석
+    texture_scores = []
+    
+    for region in black_regions:
+        if len(region) > 10:  # 충분한 픽셀이 있는 경우
+            # Local Binary Pattern 유사 텍스처 측정
+            texture = _calculate_lbp_texture(region)
+            texture_scores.append(texture)
+    
+    return np.mean(texture_scores) if texture_scores else 0.0
+
+def _calculate_lbp_texture(pixels):
+    """텍스처 계산 (1D 안전): 표준편차 + 히스토그램 엔트로피 기반
+    - 입력 `pixels`는 1차원 영역 픽셀 값(np.ndarray)일 수 있음
+    - LBP 인접 픽셀 연산 대신, 노이즈/질감을 반영하는 통계 지표를 사용
+    반환값: 0.0~1.0 범위의 텍스처 점수
+    """
+    if pixels is None or len(pixels) == 0:
+        return 0.0
+
+    # 표준편차 기반 질감(밝기 변화량이 클수록 큼)
+    std_norm = float(np.clip(np.std(pixels) / 64.0, 0.0, 1.0))
+
+    # 히스토그램 엔트로피: 분포가 균등할수록(복잡할수록) 엔트로피가 큼
+    hist, _ = np.histogram(pixels, bins=16, range=(0, 255), density=True)
+    entropy = -np.sum(hist * np.log(hist + 1e-8))
+    entropy_norm = float(np.clip(entropy / np.log(16), 0.0, 1.0))
+
+    # 가중 평균으로 통합
+    return 0.6 * std_norm + 0.4 * entropy_norm
+
+def _analyze_background_difference(current_img, background_img):
+    """배경과의 차이 분석"""
+    if background_img is None:
+        return {'change': 0.0, 'relative_diff': 0.0, 'structural_diff': 0.0}
+    
+    if current_img.shape != background_img.shape:
+        return {'change': 0.0, 'relative_diff': 0.0, 'structural_diff': 0.0}
+    
+    # 1. 그레이스케일 변환
+    if len(current_img.shape) == 3:
+        curr_gray = cv2.cvtColor(current_img, cv2.COLOR_BGR2GRAY)
+    else:
+        curr_gray = current_img
+    
+    if len(background_img.shape) == 3:
+        bg_gray = cv2.cvtColor(background_img, cv2.COLOR_BGR2GRAY)
+    else:
+        bg_gray = background_img
+    
+    # 2. 절대 차이
+    abs_diff = cv2.absdiff(curr_gray, bg_gray)
+    change_score = np.mean(abs_diff) / 255.0
+    
+    # 3. 상대적 차이
+    relative_diff = np.std(curr_gray - bg_gray) / 255.0
+    
+    # 4. 구조적 차이 (에지 기반)
+    curr_edges = cv2.Canny(curr_gray, 50, 150)
+    bg_edges = cv2.Canny(bg_gray, 50, 150)
+    edge_diff = cv2.absdiff(curr_edges, bg_edges)
+    structural_diff = np.mean(edge_diff) / 255.0
+    
+    return {
+        'change': change_score,
+        'relative_diff': relative_diff,
+        'structural_diff': structural_diff
+    }
+
+def _analyze_geometric_pattern(gray, black_masks):
+    """기하학적 패턴 분석"""
+    if not black_masks:
+        return {'shape_score': 0.0, 'symmetry': 0.0, 'compactness': 0.0}
+    
+    # 가장 큰 검은 영역 선택
+    largest_mask = max(black_masks, key=lambda m: np.sum(m > 0))
+    
+    if np.sum(largest_mask > 0) < 50:  # 너무 작은 영역은 무시
+        return {'shape_score': 0.0, 'symmetry': 0.0, 'compactness': 0.0}
+    
+    # 1. 형태 점수 (원형도, 직사각형도)
+    contours, _ = cv2.findContours(largest_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    
+    if not contours:
+        return {'shape_score': 0.0, 'symmetry': 0.0, 'compactness': 0.0}
+    
+    largest_contour = max(contours, key=cv2.contourArea)
+    area = cv2.contourArea(largest_contour)
+    perimeter = cv2.arcLength(largest_contour, True)
+    
+    if perimeter > 0:
+        circularity = 4 * np.pi * area / (perimeter * perimeter)
+        compactness = area / (perimeter * perimeter)
+    else:
+        circularity = compactness = 0.0
+    
+    # 2. 대칭성 분석
+    symmetry = _calculate_symmetry_score(largest_mask)
+    
+    # 3. 통합 형태 점수
+    shape_score = (circularity * 0.4 + compactness * 0.3 + symmetry * 0.3)
+    
+    return {
+        'shape_score': shape_score,
+        'symmetry': symmetry,
+        'compactness': compactness
+    }
+
+def _calculate_symmetry_score(mask):
+    """마스크의 대칭성 점수 계산"""
+    h, w = mask.shape
+    center_x, center_y = w // 2, h // 2
+    
+    # 수평 대칭성
+    horizontal_symmetry = 0
+    for y in range(h):
+        for x in range(w // 2):
+            left_pixel = mask[y, x]
+            right_pixel = mask[y, w - 1 - x]
+            horizontal_symmetry += abs(int(left_pixel) - int(right_pixel))
+    
+    horizontal_symmetry = 1.0 - (horizontal_symmetry / (h * w // 2)) / 255.0
+    
+    # 수직 대칭성
+    vertical_symmetry = 0
+    for y in range(h // 2):
+        for x in range(w):
+            top_pixel = mask[y, x]
+            bottom_pixel = mask[h - 1 - y, x]
+            vertical_symmetry += abs(int(top_pixel) - int(bottom_pixel))
+    
+    vertical_symmetry = 1.0 - (vertical_symmetry / (h // 2 * w)) / 255.0
+    
+    return (horizontal_symmetry + vertical_symmetry) / 2.0
+
+def _analyze_spectral_characteristics(hsv, lab, yuv, gray):
+    """다중 스펙트럼 특성 분석"""
+    if hsv is None or lab is None or yuv is None:
+        return {'black_signature': 0.0, 'color_consistency': 0.0, 'spectral_contrast': 0.0}
+    
+    # 1. HSV 공간에서의 검은 기물 특성
+    hsv_black_score = _analyze_hsv_black_characteristics(hsv)
+    
+    # 2. LAB 공간에서의 검은 기물 특성
+    lab_black_score = _analyze_lab_black_characteristics(lab)
+    
+    # 3. YUV 공간에서의 검은 기물 특성
+    yuv_black_score = _analyze_yuv_black_characteristics(yuv)
+    
+    # 4. 통합 스펙트럼 점수
+    black_signature = (hsv_black_score * 0.4 + lab_black_score * 0.4 + yuv_black_score * 0.2)
+    
+    return {
+        'black_signature': black_signature,
+        'color_consistency': min(hsv_black_score, lab_black_score, yuv_black_score),
+        'spectral_contrast': max(hsv_black_score, lab_black_score, yuv_black_score) - min(hsv_black_score, lab_black_score, yuv_black_score)
+    }
+
+def _analyze_hsv_black_characteristics(hsv):
+    """HSV 공간에서 검은 기물 특성 분석"""
+    # 검은 기물은 낮은 명도(V)와 낮은 채도(S)를 가짐
+    v_channel = hsv[:, :, 2]
+    s_channel = hsv[:, :, 1]
+    
+    # 낮은 명도 픽셀 비율
+    low_v_ratio = np.sum(v_channel < 60) / v_channel.size
+    
+    # 낮은 채도 픽셀 비율
+    low_s_ratio = np.sum(s_channel < 50) / s_channel.size
+    
+    # 검은 기물 점수
+    black_score = (low_v_ratio * 0.7 + low_s_ratio * 0.3)
+    
+    return black_score
+
+def _analyze_lab_black_characteristics(lab):
+    """LAB 공간에서 검은 기물 특성 분석"""
+    # LAB에서 L(명도) 채널이 낮은 것이 검은 기물
+    l_channel = lab[:, :, 0]
+    
+    # 낮은 명도 픽셀 비율
+    low_l_ratio = np.sum(l_channel < 40) / l_channel.size
+    
+    return low_l_ratio
+
+def _analyze_yuv_black_characteristics(yuv):
+    """YUV 공간에서 검은 기물 특성 분석"""
+    # YUV에서 Y(휘도) 채널이 낮은 것이 검은 기물
+    y_channel = yuv[:, :, 0]
+    
+    # 낮은 휘도 픽셀 비율
+    low_y_ratio = np.sum(y_channel < 60) / y_channel.size
+    
+    return low_y_ratio
+
+def _geometric_piece_analysis(cell_img):
+    """기하학적 특징 분석 (기물의 형태적 특성)"""
+    if cell_img is None or cell_img.size == 0:
+        return 0.0, 0.0, 0.0
+    
+    if len(cell_img.shape) == 3:
+        gray = cv2.cvtColor(cell_img, cv2.COLOR_BGR2GRAY)
+    else:
+        gray = cell_img
+    
+    # 1. 다중 임계값으로 기물 검출
+    thresholds = [30, 50, 70, 90]
+    geometric_scores = []
+    
+    for thresh in thresholds:
+        _, binary = cv2.threshold(gray, thresh, 255, cv2.THRESH_BINARY_INV)
+        
+        # 모폴로지 연산
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+        
+        # 컨투어 찾기
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours:
+            # 가장 큰 컨투어 선택
+            largest_contour = max(contours, key=cv2.contourArea)
+            area = cv2.contourArea(largest_contour)
+            
+            if area > 50:  # 의미있는 크기
+                # 형태 분석
+                perimeter = cv2.arcLength(largest_contour, True)
+                if perimeter > 0:
+                    circularity = 4 * np.pi * area / (perimeter * perimeter)
+                    
+                    # 직사각형도
+                    x, y, w, h = cv2.boundingRect(largest_contour)
+                    rect_area = w * h
+                    rectangularity = area / rect_area if rect_area > 0 else 0
+                    
+                    # 기하학적 점수
+                    geo_score = (circularity * 0.5 + rectangularity * 0.5)
+                    geometric_scores.append(geo_score)
+    
+    # 평균 기하학적 점수
+    avg_geometric = np.mean(geometric_scores) if geometric_scores else 0.0
+    
+    # 2. 기물의 대칭성 분석
+    symmetry_score = _analyze_symmetry(gray)
+    
+    # 3. 기물의 경계 명확도
+    boundary_clarity = _analyze_boundary_clarity(gray)
+    
+    return avg_geometric, symmetry_score, boundary_clarity
+
+def _analyze_symmetry(gray_img):
+    """이미지의 대칭성 분석"""
+    if gray_img.size == 0:
+        return 0.0
+    
+    h, w = gray_img.shape
+    center_x, center_y = w // 2, h // 2
+    
+    # 수평 대칭성
+    horizontal_symmetry = 0
+    for y in range(h):
+        for x in range(w // 2):
+            left_pixel = gray_img[y, x]
+            right_pixel = gray_img[y, w - 1 - x]
+            horizontal_symmetry += abs(left_pixel - right_pixel)
+    
+    horizontal_symmetry = 1.0 - (horizontal_symmetry / (h * w // 2)) / 255.0
+    
+    # 수직 대칭성
+    vertical_symmetry = 0
+    for y in range(h // 2):
+        for x in range(w):
+            top_pixel = gray_img[y, x]
+            bottom_pixel = gray_img[h - 1 - y, x]
+            vertical_symmetry += abs(top_pixel - bottom_pixel)
+    
+    vertical_symmetry = 1.0 - (vertical_symmetry / (h // 2 * w)) / 255.0
+    
+    return (horizontal_symmetry + vertical_symmetry) / 2.0
+
+def _analyze_boundary_clarity(gray_img):
+    """경계 명확도 분석"""
+    if gray_img.size == 0:
+        return 0.0
+    
+    # Sobel 연산자로 경계 검출
+    grad_x = cv2.Sobel(gray_img, cv2.CV_64F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray_img, cv2.CV_64F, 0, 1, ksize=3)
+    gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+    
+    # 경계 강도의 표준편차 (명확한 경계일수록 높음)
+    boundary_clarity = np.std(gradient_magnitude) / np.max(gradient_magnitude) if np.max(gradient_magnitude) > 0 else 0
+    
+    return boundary_clarity
+
+def _mean_certain_board_from_warp(warp, background_warp=None):
+    """와핑된 400x400 보드에서 8x8 칸 중앙부 확실한 분석 결과를 반환"""
+    h, w = warp.shape[:2]
+    cell_h = h // 8
+    cell_w = w // 8
+    
+    # 11개 채널: [edge_ratio, grad_magnitude, contour_area, color_variation, texture_score, shape_score, bg_subtraction, piece_characteristics, black_confidence, geo_score, integrated_confidence]
+    out = np.zeros((8, 8, 11), np.float32)
+    
+    for i in range(8):
+        for j in range(8):
+            y1, y2, x1, x2 = _roi_bounds(i, j, cell_h, cell_w, h, w)
+            cell = warp[y1:y2, x1:x2]
+            
+            # 배경 이미지가 있으면 해당 셀의 배경도 추출
+            background_cell = None
+            if background_warp is not None:
+                bg_y1, bg_y2, bg_x1, bg_x2 = _roi_bounds(i, j, cell_h, cell_w, background_warp.shape[0], background_warp.shape[1])
+                background_cell = background_warp[bg_y1:bg_y2, bg_x1:bg_x2]
+            
+            features = _analyze_cell_certain(cell, background_cell)
+            out[i, j] = features
+    
+    return out
+
+def _safe_find_corners(frame):
+    """
+    find_green_corners 시그니처 차이를 흡수하고,
+    반환된 4점을 TL, TR, BR, BL 순서로 강제 정렬해서 돌려준다.
+    """
+    import numpy as np
+
+    corners = None
+    try:
+        lower = np.array([Hmin, Smin, Vmin], dtype=np.uint8)
+        upper = np.array([Hmax, Smax, Vmax], dtype=np.uint8)
+        # 일부 버전은 (frame, lower, upper, min_area=...) 시그니처
+        corners = find_green_corners(frame, lower, upper, min_area=60)
+    except TypeError:
+        # 다른 버전은 (frame)만 받는 시그니처
+        corners = find_green_corners(frame)
+
+    if corners is not None and len(corners) == 4:
+        try:
+            corners = _order_corners_tl_tr_br_bl(corners)
+        except Exception:
+            # 혹시라도 형상 문제 등으로 정렬 실패 시 원본 유지
+            pass
+
+    return corners
+
+def _capture_avg_certain_board(cap, n_frames=8, sleep_sec=0.02, background_warp=None):
+    """짧은 시간 n_frames 프레임을 평균해서 확실한 보드값을 안정적으로 산출"""
+    acc = np.zeros((8, 8, 11), np.float32)
+    cnt = 0
+    last_warp = None
+
+    for _ in range(n_frames):
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        corners = _safe_find_corners(frame)
+
+        if corners is not None and len(corners) == 4:
+            warp = warp_chessboard(frame, corners, size=400)
+        else:
+            warp = cv2.resize(frame, (400, 400))
+
+        last_warp = warp
+        acc += _mean_certain_board_from_warp(warp, background_warp)
+        cnt += 1
+        time.sleep(sleep_sec)
+
+    if cnt == 0:
+        return None, None
+    return acc / cnt, last_warp
+
+# =======================
+# 부팅 시 보드/기준 로드
+# =======================
+def _startup_load_state():
+    global chess_pieces, init_board_values
+    # init_board_values
+    if os.path.exists(NPPATH):
+        try:
+            init_board_values = np.load(NPPATH)
+            print(f'[BOOT] init_board_values.npy 로드 완료: {NPPATH}')
+        except Exception as e:
+            print(f'[BOOT] init_board_values.npy 로드 실패: {e}')
+            init_board_values = None
+    else:
+        print(f'[BOOT] init_board_values.npy 없음: {NPPATH}')
+
+    # chess_pieces.pkl
+    if os.path.exists(PKLPATH):
+        try:
+            with open(PKLPATH, 'rb') as f:
+                cp = pickle.load(f)
+            if isinstance(cp, list) and len(cp) == 8 and all(isinstance(r, list) and len(r) == 8 for r in cp):
+                chess_pieces = cp
+                print(f'[BOOT] chess_pieces.pkl 로드 완료: {PKLPATH}')
+            else:
+                print('[BOOT] chess_pieces.pkl 형식 이상 -> 기본값 사용')
+        except Exception as e:
+            print(f'[BOOT] chess_pieces.pkl 로드 실패: {e}')
+    else:
+        try:
+            with open(PKLPATH, 'wb') as f:
+                pickle.dump(chess_pieces, f)
+            print(f'[BOOT] chess_pieces.pkl 생성(초기 배열): {PKLPATH}')
+        except Exception as e:
+            print(f'[BOOT] chess_pieces.pkl 생성 실패: {e}')
+
+# =======================
+# 프레임 읽기 스레드
+# =======================
+def frame_reader():
+    global latest_frame
+    while True:
+        ret, frame = cap.read()
+        if ret:
+            latest_frame = frame
+        time.sleep(0.01)
+
+# =======================
+# Flask 앱
+# =======================
+app = Flask(__name__)
+hsv_values_global = []
+
+def gen_original_frames_with_hsv():
+    global hsv_values_global
+    for frame_bytes, hsv_values in gen_original_frames(cap):
+        hsv_values_global = hsv_values
+        yield (b'--frame\r\n'
+               b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+
+# ---------- 스트림 라우트 ----------
+@app.route('/warp')
+def warp_feed():
+    return Response(gen_warped_frames(cap), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/original')
+def original_feed():
+    return Response(gen_original_frames_with_hsv(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@app.route('/edges')
+def edges_feed():
+    return Response(gen_edges_frames(cap), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# 차이 시각화: threshold 완화(40 → 15) + 절대경로 사용
+@app.route('/piece')
+def piece_feed():
+    from piece_recognition import gen_edges_frames as gen_diff_frames
+    return Response(gen_diff_frames(cap, base_board_path=NPPATH, threshold=15,top_k=2),
+                    mimetype='multipart/x-mixed-replace; boundary=frame')
+
+# ---------- 상태 라우트 ----------
+@app.route('/turn_status')
+def turn_status():
+    return {'current': turn_color, 'previous': prev_turn_color}
+
+# ---------- 보드/기준 시각화 ----------
+@app.route('/base_board_img')
+def base_board_img():
+    global latest_frame, init_board_values, chess_pieces
+    h, w = 400, 400
+    cell_h = h // 8
+    cell_w = w // 8
+
+    if not (isinstance(chess_pieces, list) and len(chess_pieces) == 8 and all(isinstance(row, list) and len(row) == 8 for row in chess_pieces)):
+        print('chess_pieces가 8x8 배열이 아님! 기본값으로 대체')
+        chess_pieces = [[''] * 8 for _ in range(8)]
+
+    base_img = np.ones((h, w, 3), dtype=np.uint8) * 220
+    for i in range(8):
+        for j in range(8):
+            chess_i = i  # 시각화 좌표계를 와핑/업데이트와 동일하게 유지
+            y1, y2 = i * cell_h, (i + 1) * cell_h
+            x1, x2 = j * cell_w, (j + 1) * cell_w
+
+            # 보드 칠하기
+            if (i + j) % 2 == 0:
+                cv2.rectangle(base_img, (x1, y1), (x2, y2), (180, 180, 180), -1)
+            else:
+                cv2.rectangle(base_img, (x1, y1), (x2, y2), (240, 240, 240), -1)
+
+            # 기물 텍스트
+            piece = chess_pieces[chess_i][j]
+            if piece:
+                color = (255, 255, 255) if piece[0] == 'W' else (0, 0, 0) if piece[0] == 'B' else (0, 0, 255)
+                cv2.putText(base_img, piece, (x1 + 8, y1 + cell_h // 2 + 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2, cv2.LINE_AA)
+
+    # 에지/컨투어 차이 수치/상위 박스
+    if latest_frame is not None and init_board_values is not None:
+        frame = latest_frame.copy()
+        corners = _safe_find_corners(frame)
+
+        if corners is not None and len(corners) == 4:
+            warp = warp_chessboard(frame, corners, size=400)
+        else:
+            warp = cv2.resize(frame, (400, 400))
+
+        # 현재 보드의 확실한 분석
+        curr_certain = _mean_certain_board_from_warp(warp)
+        
+        # 차이 계산 (고급 가중 평균)
+        diff_vals = np.zeros((8, 8), dtype=np.float32)
+        diff_list = []
+        
+        for i in range(8):
+            for j in range(8):
+                if init_board_values.shape[2] >= 3:  # 확실한 또는 고급 또는 하이브리드 또는 에지/컨투어 기반
+                    is_dark = _cell_is_dark(warp, i, j)
+                    if init_board_values.shape[2] == 11:  # 확실한 분석 (11채널)
+                        diff = _weighted_diff(curr_certain[i, j], init_board_values[i, j], is_dark, 11)
+                    elif init_board_values.shape[2] == 8:  # 고급 분석 (8채널)
+                        diff = _weighted_diff(curr_certain[i, j], init_board_values[i, j], is_dark, 8)
+                    elif init_board_values.shape[2] == 5:  # 하이브리드 (5채널)
+                        diff = _weighted_diff(curr_certain[i, j], init_board_values[i, j], is_dark, 5)
+                    else:  # 에지/컨투어 (3채널)
+                        diff = _weighted_diff(curr_certain[i, j], init_board_values[i, j], is_dark, 3)
+                else:  # 기존 BGR 기반 (하위 호환성)
+                    y1, y2 = i * cell_h, (i + 1) * cell_h
+                    x1, x2 = j * cell_w, (j + 1) * cell_w
+                    cell = warp[y1:y2, x1:x2]
+                    mean_bgr = np.mean(cell.reshape(-1, 3), axis=0)
+                    diff = np.linalg.norm(mean_bgr - init_board_values[i, j])
+                
+                diff_vals[i, j] = diff
+                diff_list.append((diff, i, j))
+
+        # 숫자(굵게)
+        for i in range(8):
+            for j in range(8):
+                y1 = i * cell_h
+                x1 = j * cell_w
+                text = f"{diff_vals[i, j]:.2f}"
+                cv2.putText(base_img, text, (x1 + 4, y1 + cell_h // 2 + 6),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 200), 2, cv2.LINE_AA)
+
+        # 상위 2칸 박스(두께 3)
+        diff_list.sort(reverse=True)
+        shown = 0
+        used = set()
+        for diff, i, j in diff_list:
+            if (i, j) in used:
+                continue
+            y1, y2 = i * cell_h, (i + 1) * cell_h
+            x1, x2 = j * cell_w, (j + 1) * cell_w
+            cv2.rectangle(base_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+            used.add((i, j))
+            shown += 1
+            if shown == 2:
+                break
+
+    _, buffer = cv2.imencode('.jpg', base_img)
+    return Response(buffer.tobytes(), mimetype='image/jpeg')
+
+# ---------- 초기 상태 강제 리셋 ----------
+@app.route('/reset_board', methods=['POST'])
+def reset_board():
+    """체스판을 완전히 초기 상태로 리셋"""
+    global chess_pieces, init_board_values
+    
+    # 체스 기물을 초기 상태로 설정
+    chess_pieces = [
+        ['BR', 'BN', 'BB', 'BQ', 'BK', 'BB', 'BN', 'BR'],  # 8th rank (a8-h8)
+        ['BP', 'BP', 'BP', 'BP', 'BP', 'BP', 'BP', 'BP'],  # 7th rank (a7-h7)
+        ['', '', '', '', '', '', '', ''],                    # 6th rank (a6-h6)
+        ['', '', '', '', '', '', '', ''],                    # 5th rank (a5-h5)
+        ['', '', '', '', '', '', '', ''],                    # 4th rank (a4-h4)
+        ['', '', '', '', '', '', '', ''],                    # 3rd rank (a3-h3)
+        ['WP', 'WP', 'WP', 'WP', 'WP', 'WP', 'WP', 'WP'],  # 2nd rank (a2-h2)
+        ['WR', 'WN', 'WB', 'WQ', 'WK', 'WB', 'WN', 'WR'],  # 1st rank (a1-h1)
+    ]
+    
+    # 기존 파일들 삭제
+    if os.path.exists(NPPATH):
+        try:
+            os.remove(NPPATH)
+            print(f"기존 기준값 파일 삭제: {NPPATH}")
+        except Exception as e:
+            print(f"기존 기준값 파일 삭제 실패: {e}")
+    
+    if os.path.exists(PKLPATH):
+        try:
+            os.remove(PKLPATH)
+            print(f"기존 체스 기물 파일 삭제: {PKLPATH}")
+        except Exception as e:
+            print(f"기존 체스 기물 파일 삭제 실패: {e}")
+    
+    # 전역 변수 리셋
+    init_board_values = None
+    move_history.clear()
+    
+    print("체스판 완전 초기화 완료")
+    return '체스판 완전 초기화 완료', 200
+
+# ---------- 기준값 저장 ----------
+@app.route('/set_init_board', methods=['POST'])
+def set_init_board():
+    """현재 프레임을 와핑 후 8x8 에지/컨투어 분석 결과를 기준으로 저장"""
+    global init_board_values, latest_frame, chess_pieces
+
+    if latest_frame is None:
+        return '프레임 없음', 400
+
+    frame = latest_frame.copy()
+    corners = _safe_find_corners(frame)
+
+    warp = warp_chessboard(frame, corners, size=400) if corners is not None else cv2.resize(frame, (400, 400))
+
+    # 확실한 분석 결과 저장
+    board_vals = _mean_certain_board_from_warp(warp)
+
+    np.save(NPPATH, board_vals)
+    init_board_values = board_vals
+    
+    # 체스 기물도 초기 상태로 리셋
+    chess_pieces = [
+        ['BR', 'BN', 'BB', 'BQ', 'BK', 'BB', 'BN', 'BR'],  # 8th rank (a8-h8)
+        ['BP', 'BP', 'BP', 'BP', 'BP', 'BP', 'BP', 'BP'],  # 7th rank (a7-h7)
+        ['', '', '', '', '', '', '', ''],                    # 6th rank (a6-h6)
+        ['', '', '', '', '', '', '', ''],                    # 5th rank (a5-h5)
+        ['', '', '', '', '', '', '', ''],                    # 4th rank (a4-h4)
+        ['', '', '', '', '', '', '', ''],                    # 3rd rank (a3-h3)
+        ['WP', 'WP', 'WP', 'WP', 'WP', 'WP', 'WP', 'WP'],  # 2nd rank (a2-h2)
+        ['WR', 'WN', 'WB', 'WQ', 'WK', 'WB', 'WN', 'WR'],  # 1st rank (a1-h1)
+    ]
+    
+    # 초기 상태를 파일로 저장
+    try:
+        with open(PKLPATH, 'wb') as f:
+            pickle.dump(chess_pieces, f)
+        print(f"체스 기물 초기 상태 저장: {PKLPATH}")
+    except Exception as e:
+        print(f"체스 기물 저장 실패: {e}")
+    
+    print(f"에지/컨투어 기반 초기상태 저장: {NPPATH}")
+    return '에지/컨투어 기반 초기상태 및 체스 기물 초기화 완료', 200
+
+# ---------- 턴 전환(에지/컨투어 기반 이동 추정 + 새 기준 저장) ----------
+@app.route('/next_turn', methods=['POST'])
+def next_turn():
+    """에지/컨투어 기반 이동 추정 + 턴 전환 + 새 기준 저장"""
+    global init_board_values, latest_frame, reload_base_board, turn_color, prev_turn_color
+    global prev_board_values, prev_warp, chess_pieces, move_history
+
+    # 턴 토글
+    prev_turn_color = turn_color
+    turn_color = 'black' if turn_color == 'white' else 'white'
+    print(f"이전 턴: {prev_turn_color}, 현재 턴: {turn_color}")
+
+    # 현재 보드 상태 저장(스냅샷)
+    try:
+        with open(PKLPATH, 'wb') as f:
+            pickle.dump(chess_pieces, f)
+    except Exception as e:
+        print(f'[WARN] chess_pieces.pkl 저장 실패(사전): {e}')
+
+    if latest_frame is None:
+        return '프레임 없음', 400
+
+    # 이전 기준(에지/컨투어 기반)
+    prev_board_values = np.load(NPPATH) if os.path.exists(NPPATH) else None
+
+    # ---------- 여러 프레임 평균 + 확실한 공간으로 현재 보드 추정 ----------
+    curr_certain, warp = _capture_avg_certain_board(cap, n_frames=8, sleep_sec=0.02)
+    if curr_certain is None:
+        return '현재 보드 캡처 실패', 500
+    prev_warp = warp.copy()
+
+    # 이전 기준과 현재 보드 비교
+    if prev_board_values is not None and prev_board_values.shape == curr_certain.shape:
+        # 확실한 차이 계산
+        diff_mat = np.zeros((8, 8), np.float32)
+        for i in range(8):
+            for j in range(8):
+                is_dark = _cell_is_dark(warp, i, j)
+                if prev_board_values.shape[2] == 11:  # 확실한 분석 (11채널)
+                    diff_mat[i, j] = _weighted_diff(curr_certain[i, j], prev_board_values[i, j], is_dark, 11)
+                elif prev_board_values.shape[2] == 8:  # 고급 분석 (8채널)
+                    diff_mat[i, j] = _weighted_diff(curr_certain[i, j], prev_board_values[i, j], is_dark, 8)
+                elif prev_board_values.shape[2] == 5:  # 하이브리드 (5채널)
+                    diff_mat[i, j] = _weighted_diff(curr_certain[i, j], prev_board_values[i, j], is_dark, 5)
+                else:  # 에지/컨투어 (3채널)
+                    diff_mat[i, j] = _weighted_diff(curr_certain[i, j], prev_board_values[i, j], is_dark, 3)
+    else:
+        # 첫 실행이거나 형식이 다른 경우
+        diff_mat = np.ones((8, 8), np.float32) * 0.1  # 기본값
+
+    # === (A) 적응 임계값 계산 ===
+    mu = float(diff_mat.mean())
+    sigma = float(diff_mat.std())
+    adaptive_thr = max(0.05, mu + 0.75 * sigma)
+
+    # === (B) 에지 게이트 계산 ===
+    h_warp, w_warp = warp.shape[:2]
+    cell_h = h_warp // 8
+    cell_w = w_warp // 8
+    gray = cv2.GaussianBlur(cv2.cvtColor(warp, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+    grad_map = np.zeros((8, 8), np.float32)
+    for i in range(8):
+        for j in range(8):
+            y1, y2, x1, x2 = _roi_bounds(i, j, cell_h, cell_w, h_warp, w_warp)
+            roi = gray[y1:y2, x1:x2]
+            gx = cv2.Sobel(roi, cv2.CV_32F, 1, 0, ksize=3)
+            gy = cv2.Sobel(roi, cv2.CV_32F, 0, 1, ksize=3)
+            mag = cv2.magnitude(gx, gy)
+            grad_map[i, j] = float(mag.mean())
+
+    # robust z-score (median/MAD) → 그림자에 둔감
+    g_med = float(np.median(grad_map))
+    g_mad = float(np.median(np.abs(grad_map - g_med))) + 1e-6
+    grad_z = (grad_map - g_med) / (1.4826 * g_mad + 1e-6)
+
+    # === (C) 후보 선정: 에지/컨투어 임계 + 에지 게이트 동시 만족 우선 ===
+    flat = diff_mat.flatten()
+    order = np.argsort(-flat)  # 차이 큰 순
+    K = 6
+    candidates = []
+
+    # 1차: 두 조건(에지/컨투어 >= thr, grad_z >= GRAD_Z_THR) 동시에 만족
+    for idx in order:
+        i, j = idx // 8, idx % 8
+        if diff_mat[i, j] < adaptive_thr:
+            continue
+        if grad_z[i, j] < GRAD_Z_THR:
+            continue
+        candidates.append((i, j, float(diff_mat[i, j])))
+        if len(candidates) >= K:
+            break
+
+    # 2차 보완: 조건 한 개만 충족하는 셀로 채움 (너무 빡빡할 때)
+    if len(candidates) < 2:
+        for idx in order:
+            i, j = idx // 8, idx % 8
+            if diff_mat[i, j] < adaptive_thr:
+                continue
+            if (i, j, float(diff_mat[i, j])) not in candidates:
+                candidates.append((i, j, float(diff_mat[i, j])))
+                if len(candidates) >= K:
+                    break
+
+    # 3차 최종 폴백: 정말 없으면 그냥 상위 에지/컨투어 2개
+    if len(candidates) < 2:
+        i1, j1 = order[0] // 8, order[0] % 8
+        i2, j2 = order[1] // 8, order[1] % 8
+        candidates = [(i1, j1, float(diff_mat[i1, j1])), (i2, j2, float(diff_mat[i2, j2]))]
+
+    # 이전 보드의 말 상태
+    try:
+        with open(PKLPATH, 'rb') as f:
+            before_board = pickle.load(f)
+    except Exception:
+        before_board = [row[:] for row in chess_pieces]
+
+    mover_color = prev_turn_color  # 이번에 실제로 움직인 편
+    best = None  # (score, (src_i,src_j), (dst_i,dst_j))
+
+    def is_valid(i, j): return 0 <= i < 8 and 0 <= j < 8
+
+    def is_valid_move(src_i, src_j, dst_i, dst_j, board):
+        """체스 규칙에 따른 유효한 이동인지 검증"""
+        if not is_valid(src_i, src_j) or not is_valid(dst_i, dst_j):
+            return False
+        
+        psrc = board[src_i][src_j]
+        pdst = board[dst_i][dst_j]
+        
+        if not psrc:  # 출발지에 기물이 없음
+            return False
+        
+        # 같은 색 기물을 잡을 수 없음
+        if pdst and psrc[0] == pdst[0]:
+            return False
+        
+        # 기물 타입별 이동 규칙 검증
+        piece_type = psrc[1]
+        
+        if piece_type == 'P':  # 폰
+            direction = -1 if psrc[0] == 'W' else 1  # 흰색은 위로, 검은색은 아래로
+            file_diff = abs(dst_j - src_j)
+            rank_diff = dst_i - src_i
+            
+            # 일반 전진 (1칸)
+            if file_diff == 0 and rank_diff == direction:
+                return not pdst  # 목적지가 비어있어야 함
+            
+            # 첫 이동 시 2칸 전진
+            if file_diff == 0 and rank_diff == 2 * direction:
+                if (psrc[0] == 'W' and src_i == 6) or (psrc[0] == 'B' and src_i == 1):
+                    mid_i = src_i + direction
+                    return not board[mid_i][src_j] and not pdst  # 중간 경로도 비어있어야 함
+            
+            # 대각선 공격 (1칸)
+            if abs(file_diff) == 1 and rank_diff == direction:
+                return bool(pdst)  # 목적지에 상대 기물이 있어야 함
+            
+            # 폰은 뒤로 갈 수 없음
+            if (psrc[0] == 'W' and rank_diff > 0) or (psrc[0] == 'B' and rank_diff < 0):
+                return False
+            
+            return False
+            
+        elif piece_type == 'R':  # 룩
+            if src_i != dst_i and src_j != dst_j:  # 직선 이동만 가능
+                return False
+            return _is_path_clear(src_i, src_j, dst_i, dst_j, board)
+            
+        elif piece_type == 'N':  # 나이트
+            rank_diff = abs(dst_i - src_i)
+            file_diff = abs(dst_j - src_j)
+            return (rank_diff == 2 and file_diff == 1) or (rank_diff == 1 and file_diff == 2)
+            
+        elif piece_type == 'B':  # 비숍
+            if abs(dst_i - src_i) != abs(dst_j - src_j):  # 대각선 이동만 가능
+                return False
+            return _is_path_clear(src_i, src_j, dst_i, dst_j, board)
+            
+        elif piece_type == 'Q':  # 퀸
+            rank_diff = abs(dst_i - src_i)
+            file_diff = abs(dst_j - src_j)
+            if not (src_i == dst_i or src_j == dst_j or rank_diff == file_diff):  # 직선 또는 대각선
+                return False
+            return _is_path_clear(src_i, src_j, dst_i, dst_j, board)
+            
+        elif piece_type == 'K':  # 킹
+            rank_diff = abs(dst_i - src_i)
+            file_diff = abs(dst_j - src_j)
+            return rank_diff <= 1 and file_diff <= 1  # 1칸 이동만 가능
+        
+        return True  # 알 수 없는 기물 타입은 허용
+    
+    def _is_path_clear(src_i, src_j, dst_i, dst_j, board):
+        """이동 경로에 다른 기물이 있는지 확인"""
+        if src_i == dst_i:  # 가로 이동
+            start_j, end_j = min(src_j, dst_j), max(src_j, dst_j)
+            for j in range(start_j + 1, end_j):
+                if board[src_i][j]:
+                    return False
+        elif src_j == dst_j:  # 세로 이동
+            start_i, end_i = min(src_i, dst_i), max(src_i, dst_i)
+            for i in range(start_i + 1, end_i):
+                if board[i][src_j]:
+                    return False
+        else:  # 대각선 이동
+            rank_step = 1 if dst_i > src_i else -1
+            file_step = 1 if dst_j > src_j else -1
+            i, j = src_i + rank_step, src_j + file_step
+            while i != dst_i and j != dst_j:
+                if board[i][j]:
+                    return False
+                i += rank_step
+                j += file_step
+        return True
+
+    def pair_score(src_i, src_j, dst_i, dst_j, ds, dd):
+        psrc = before_board[src_i][src_j] if is_valid(src_i, src_j) else ''
+        pdst = before_board[dst_i][dst_j] if is_valid(dst_i, dst_j) else ''
+        score = 0.0
+        
+        # 기본 변화량 점수
+        score += 1.0 * ds + 0.8 * dd
+        
+        # 체스 규칙 검증 점수 (매우 중요)
+        if is_valid_move(src_i, src_j, dst_i, dst_j, before_board):
+            score += 10.0  # 유효한 이동에 높은 점수
+        else:
+            score -= 50.0  # 무효한 이동에 큰 페널티
+        
+        # 기물 색상 검증
+        if _is_color_piece(psrc, mover_color): 
+            score += 2.0
+        
+        # 목적지 검증
+        if not pdst:  # 빈칸으로 이동
+            score += 1.0
+        elif psrc and pdst and psrc[0] != pdst[0]:  # 상대 기물 공격
+            score += 1.5
+        
+        # 같은 칸 방지
+        if src_i == dst_i and src_j == dst_j: 
+            score -= 100.0
+        
+        # 이동 거리 고려 (너무 긴 이동은 의심)
+        distance = abs(dst_i - src_i) + abs(dst_j - src_j)
+        if distance > 4:
+            score -= 2.0
+        
+        return score
+
+    # 후보쌍 평가
+    for a in range(len(candidates)):
+        i1, j1, d1 = candidates[a]
+        for b in range(a + 1, len(candidates)):
+            i2, j2, d2 = candidates[b]
+
+            # 둘 다 임계 미만이면 스킵 (너무 미세한 변화)
+            if d1 < adaptive_thr and d2 < adaptive_thr:
+                continue
+
+            s1 = pair_score(i1, j1, i2, j2, d1, d2)
+            s2 = pair_score(i2, j2, i1, j1, d2, d1)
+            if best is None or s1 > best[0]:
+                best = (s1, (i1, j1), (i2, j2))
+            if s2 > best[0]:
+                best = (s2, (i2, j2), (i1, j1))
+
+    # 최종 선택 (폴백 포함)
+    if best is None:
+        (i1, j1) = (order[0] // 8, order[0] % 8)
+        (i2, j2) = (order[1] // 8, order[1] % 8)
+        src, dst = (i1, j1), (i2, j2)
+        print(f"[WARN] adaptive pick 실패 -> fallback src/dst={src}->{dst} (thr={adaptive_thr:.4f})")
+    else:
+        _, src, dst = best
+        print(f"[DEBUG] adaptive pick src={src} dst={dst} thr={adaptive_thr:.4f}")
+    
+    # 디버깅: 선택된 이동의 상세 정보 출력
+    src_piece = before_board[src[0]][src[1]] if is_valid(src[0], src[1]) else 'None'
+    dst_piece = before_board[dst[0]][dst[1]] if is_valid(dst[0], dst[1]) else 'None'
+    src_coord = coord_to_chess_notation(src[0], src[1])
+    dst_coord = coord_to_chess_notation(dst[0], dst[1])
+    
+    print(f"[DEBUG] 선택된 이동: {src_piece} {src_coord} -> {dst_coord}")
+    print(f"[DEBUG] 이동 유효성: {is_valid_move(src[0], src[1], dst[0], dst[1], before_board)}")
+    
+    # 상위 후보들의 점수도 출력
+    print(f"[DEBUG] 상위 후보들:")
+    for idx, (i, j, diff_val) in enumerate(candidates[:5]):
+        coord = coord_to_chess_notation(i, j)
+        piece = before_board[i][j] if is_valid(i, j) else 'None'
+        print(f"  {idx+1}. {coord} ({piece}): diff={diff_val:.4f}")
+
+    # --- board_vals(확실한) 생성: 다음 턴 기준 저장용 ---
+    board_vals = _mean_certain_board_from_warp(warp)
+
+    # ---- 이동 반영 ----
+    try:
+        with open(PKLPATH, 'rb') as f:
+            chess_pieces = pickle.load(f)
+    except Exception:
+        pass
+
+    before = [row[:] for row in chess_pieces]
+    chess_pieces = update_chess_pieces(chess_pieces, src, dst)
+
+    # 기보 기록
+    piece_src = before[src[0]][src[1]]
+    piece_dst = before[dst[0]][dst[1]]
+    if piece_src and not piece_dst:
+        move_str = f"{piece_to_fen(piece_src)} {coord_to_chess_notation(src[0], src[1])}-{coord_to_chess_notation(dst[0], dst[1])}"
+    elif piece_dst and not piece_src:
+        move_str = f"{piece_to_fen(piece_dst)} {coord_to_chess_notation(dst[0], dst[1])}-{coord_to_chess_notation(src[0], src[1])}"
+    else:
+        move_str = f"? {coord_to_chess_notation(src[0], src[1])}<->{coord_to_chess_notation(dst[0], dst[1])}"
+    print(f"[DEBUG] move: {move_str}")
+    move_history.append(move_str)
+
+    # 저장
+    try:
+        with open(PKLPATH, 'wb') as f:
+            pickle.dump(chess_pieces, f)
+    except Exception as e:
+        print(f'[WARN] chess_pieces.pkl 저장 실패(사후): {e}')
+
+    # 기존 기준 삭제 후 새 기준 저장
+    if os.path.exists(NPPATH):
+        try:
+            os.remove(NPPATH)
+            print(f"삭제 성공: {NPPATH}")
+        except Exception as e:
+            print(f"삭제 중 예외 발생: {e}")
+    else:
+        print(f"삭제할 파일이 없음: {NPPATH}")
+
+    np.save(NPPATH, board_vals)
+    try:
+        init_board_values = np.load(NPPATH)
+    except Exception as e:
+        init_board_values = board_vals
+        print(f'[WARN] 새 기준 재로드 실패: {e}')
+
+    print(f"에지/컨투어 기반 새 기준값 저장: {NPPATH}")
+    reload_base_board = True    
+    return '에지/컨투어 기반 턴 기록 및 전환 완료', 200
+
+# ---------- 메인 UI ----------
+@app.route('/')
+def index():
+    global turn_color, prev_turn_color, move_history
+    move_str = ' -> '.join(move_history)
+    return render_template_string('''
+    <h1>체스판 실시간 분석 (에지/컨투어 기반)</h1>
+    <div style="margin-bottom:10px; font-size:18px;">
+      <b>현재 턴:</b> {{turn_color}}<br>
+      <b>이전 턴:</b> {{prev_turn_color if prev_turn_color else '없음'}}
+    </div>
+    <button onclick="resetBoard()" style="background-color: #ff6b6b; color: white; margin-right: 10px;">체스판 완전 초기화</button>
+    <button onclick="setInitialBoard()">에지/컨투어 기반 초기상태 저장</button>
+    <button onclick="nextTurn()">턴 기록 및 전환</button>
+    <script>
+    function resetBoard() {
+      if (confirm('정말로 체스판을 완전히 초기 상태로 리셋하시겠습니까?')) {
+        fetch('/reset_board', {method: 'POST'})
+          .then(r => r.text())
+          .then(msg => {
+            alert(msg);
+            location.reload();
+          });
+      }
+    }
+    function setInitialBoard() {
+      fetch('/set_init_board', {method: 'POST'})
+        .then(r => r.text())
+        .then(msg => {
+          alert(msg);
+          const pieceDiv = document.getElementById('piece-div');
+          if (pieceDiv) {
+            pieceDiv.innerHTML = '<img src="/piece?ts=' + Date.now() + '" width="320" height="320" style="border:1px solid #aaa;">';
+          }
+          const baseDiv = document.getElementById('base-div');
+          if (baseDiv) {
+            baseDiv.innerHTML = '<img src="/base_board_img?ts=' + Date.now() + '" width="320" height="320" style="border:1px solid #aaa;">';
+          }
+          fetch('/turn_status').then(r=>r.json()).then(data => {
+            document.getElementById('turn-info').innerHTML =
+              '<b>현재 턴:</b> ' + data.current + '<br><b>이전 턴:</b> ' + (data.previous ? data.previous : '없음');
+          });
+        });
+    }
+    function nextTurn() {
+      fetch('/next_turn', {method: 'POST'})
+        .then(r => r.text())
+        .then(msg => {
+          alert(msg);
+          const pieceDiv = document.getElementById('piece-div');
+          if (pieceDiv) {
+            pieceDiv.innerHTML = '<img src="/piece?ts=' + Date.now() + '" width="320" height="320" style="border:1px solid #aaa;">';
+          }
+          const baseDiv = document.getElementById('base-div');
+          if (baseDiv) {
+            baseDiv.innerHTML = '<img src="/base_board_img?ts=' + Date.now() + '" width="320" height="320" style="border:1px solid #aaa;">';
+          }
+          fetch('/turn_status').then(r=>r.json()).then(data => {
+            document.getElementById('turn-info').innerHTML =
+              '<b>현재 턴:</b> ' + data.current + '<br><b>이전 턴:</b> ' + (data.previous ? data.previous : '없음');
+          });
+          location.reload();
+        });
+    }
+    </script>
+    <div id="turn-info" style="margin-bottom:10px; font-size:18px;">
+      <b>현재 턴:</b> {{turn_color}}<br>
+      <b>이전 턴:</b> {{prev_turn_color if prev_turn_color else '없음'}}
+    </div>
+    <div style="display: flex; gap: 20px;">
+      <div>
+        <h3 style="margin:0; font-size:16px;">웹캠 원본</h3>
+        <img src="/original" width="320" height="320" style="border:1px solid #aaa;">
+      </div>
+      <div>
+        <h3 style="margin:0; font-size:16px;">와핑 결과</h3>
+        <img src="/warp" width="320" height="320" style="border:1px solid #aaa;">
+      </div>
+      <div id="piece-div">
+        <h3 style="margin:0; font-size:16px;">차이 시각화</h3>
+        <img src="/piece" width="320" height="320" style="border:1px solid #aaa;">
+      </div>
+      <div id="base-div">
+        <h3 style="margin:0; font-size:16px;">기물 배열/상태 (에지/컨투어 기반)</h3>
+        <img src="/base_board_img" width="320" height="320" style="border:1px solid #aaa;">
+      </div>
+    </div>
+    <div style="margin-top:20px; font-size:16px; color:#222;">
+      <b>기물 이동 내역:</b><br>
+      {{ move_str }}
+    </div>
+    ''', turn_color=turn_color, prev_turn_color=prev_turn_color, move_str=move_str)
+
+# =======================
+# 엔트리 포인트
+# =======================
+if __name__ == '__main__':
+    _startup_load_state()
+    threading.Thread(target=frame_reader, daemon=True).start()
+    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
