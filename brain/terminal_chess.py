@@ -45,6 +45,7 @@ from move_analyzer import (
     suggest_move,
     get_all_possible_moves
 )
+from piece_detector import detect_move_and_update
 
 # Stockfish 경로
 #STOCKFISH_PATH = '/usr/games/stockfish'
@@ -207,13 +208,19 @@ def check_time_over() -> bool:
     return False
 
 def get_move_from_user():
-    """사용자로부터 이동 입력 받기 (순서 상관없음)"""
+    """CV로 기물 이동 자동 감지"""
     while True:
         try:
-            move_input = input("이동 입력 (예: e2e4 또는 e4e2, q to quit): ").strip().lower()
+            print("📹 체스판에서 기물을 움직여주세요... (Ctrl+C로 게임 종료)")
             
-            if move_input == 'q':
-                return 'quit'
+            # CV로 기물 변화 감지
+            move_input = detect_move_and_update(None, '../CV/init_board_values.npy')
+            
+            if not move_input:
+                print("❌ CV에서 기물 변화를 감지하지 못했습니다. 다시 시도하세요.")
+                continue
+                
+            print(f"📹 CV 감지 결과: {move_input}")
             
             if len(move_input) == 4:
                 # 두 좌표 추출
@@ -221,7 +228,7 @@ def get_move_from_user():
                 coord2 = move_input[2:]
                 
                 # 움직임 분석 (순서 자동 판단)
-                #TODO: CV에서 coord1,coord2 받아와서 집어넣기
+                #TODO: CV에서 coord1,coord2 받아와서 집어넣기 a1,a2
                 move_tuple = analyze_coordinates(current_board, coord1, coord2)
                 
                 if move_tuple:
