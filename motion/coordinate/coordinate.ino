@@ -169,7 +169,7 @@ void setup()
   Serial.println("mm");
   
   // 시작 준비 자세로 이동
-  robotArm.moveTo(0, 0, 60); // 예시: x=150, y=0, z=100
+  robotArm.moveTo(0, 0, 40); // 예시: x=150, y=0, z=100
   delay(2000);
 
 }
