@@ -83,6 +83,36 @@ class TimerManager:
             print(f"[!] 타이머 데이터 파싱 오류: {e}")
             return None
     
+    def check_button_press(self):
+        """타이머 버튼 입력 감지 (턴 넘기기용)"""
+        if not self.is_connected or not self.serial or not self.serial.is_open:
+            return None
+        
+        try:
+            if self.serial.in_waiting > 0:
+                raw_data = self.serial.readline()
+                data = raw_data.decode().strip()
+                
+                # 버튼 입력 패턴 감지
+                # 예상 형식들: "BUTTON_P1", "BUTTON_P2", "BTN:P1", "BTN:P2", "PRESS:P1", "PRESS:P2"
+                if any(keyword in data.upper() for keyword in ['BUTTON', 'BTN', 'PRESS']):
+                    if 'P1' in data.upper():
+                        print(f"[🔘] P1(검은색) 버튼 입력 감지: {data}")
+                        return 'P1'
+                    elif 'P2' in data.upper():
+                        print(f"[🔘] P2(흰색) 버튼 입력 감지: {data}")
+                        return 'P2'
+                
+                # 단순 버튼 명령 형식
+                elif data.upper() in ['P1', 'P2']:
+                    print(f"[🔘] 버튼 입력 감지: {data}")
+                    return data.upper()
+                
+        except Exception as e:
+            print(f"[!] 버튼 입력 감지 오류: {e}")
+        
+        return None
+    
     def read_timer_data(self):
         """아두이노에서 타이머 데이터 읽기"""
         if not self.is_connected or not self.serial or not self.serial.is_open:
@@ -255,6 +285,10 @@ def get_black_timer():
 def get_white_timer():
     """흰색 타이머 값 반환 (편의 함수)"""
     return timer_manager.white_timer
+
+def check_timer_button():
+    """타이머 버튼 입력 확인 (편의 함수)"""
+    return timer_manager.check_button_press()
 
 # 체스 게임용 타이머 함수들
 def connect_arduino():

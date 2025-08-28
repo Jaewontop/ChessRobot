@@ -12,10 +12,12 @@ from pathlib import Path
 # warp_cam_picam2_v2에서 필요한 함수들 import
 try:
     from warp_cam_picam2_v2 import (
-        find_green_corners,
-        warp_chessboard,
-        Hmin, Hmax, Smin, Smax, Vmin, Vmax
-    )
+    find_green_corners,
+    warp_chessboard,
+    FRAME_SIZE, FPS, HFLIP, VFLIP,
+    USE_AUTO_EXPOSURE, EXPOSURE_TIME, ANALOG_GAIN,
+    Hmin, Hmax, Smin, Smax, Vmin, Vmax
+)
 except ImportError:
     # warp_cam_picam2_v2가 없는 경우를 대비한 기본값
     Hmin, Hmax = 35, 85

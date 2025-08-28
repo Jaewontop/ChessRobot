@@ -20,7 +20,8 @@ from timer_manager import (
     get_black_timer, 
     get_white_timer,
     init_chess_timer,
-    get_chess_timer_status
+    get_chess_timer_status,
+    check_timer_button
 )
 from engine_manager import (
     init_engine,
@@ -207,17 +208,46 @@ def check_time_over() -> bool:
         print(f"[DEBUG] 시간 초과 검사 오류: {e}")
     return False
 
+def check_timer_button_press():
+    """타이머 버튼 입력을 확인하여 턴 넘기기 신호 반환"""
+    try:
+        button_press = check_timer_button()
+        if button_press:
+            if button_press == 'P1':
+                print("🔘 P1(검은색) 버튼 누름 - 턴 넘기기")
+                return 'black_turn_end'
+            elif button_press == 'P2':
+                print("🔘 P2(흰색) 버튼 누름 - 턴 넘기기")
+                return 'white_turn_end'
+    except Exception as e:
+        print(f"[DEBUG] 타이머 버튼 확인 오류: {e}")
+    return None
+
 def get_move_from_user():
-    """CV로 기물 이동 자동 감지"""
+    """CV로 기물 이동 자동 감지 (타이머 버튼으로 턴 넘기기 가능)"""
+    print("📹 체스판에서 기물을 움직여주세요... (타이머 버튼으로 턴 넘기기, Ctrl+C로 게임 종료)")
+    
     while True:
         try:
-            print("📹 체스판에서 기물을 움직여주세요... (Ctrl+C로 게임 종료)")
+            # 타이머 버튼 입력 확인 (턴 넘기기)
+            button_signal = check_timer_button_press()
+            if button_signal:
+                current_turn = 'white' if current_board.turn == chess.WHITE else 'black'
+                
+                # 현재 턴 플레이어가 버튼을 누르면 턴 넘기기
+                if (button_signal == 'white_turn_end' and current_turn == 'white') or \
+                   (button_signal == 'black_turn_end' and current_turn == 'black'):
+                    print(f"🔘 {current_turn} 플레이어가 타이머를 눌러 턴을 넘겼습니다!")
+                    return 'skip_turn'
+                else:
+                    print(f"⚠️  잘못된 타이밍입니다. 현재는 {current_turn} 차례입니다.")
             
             # CV로 기물 변화 감지
             move_input = detect_move_and_update(None, '../CV/init_board_values.npy')
             
             if not move_input:
-                print("❌ CV에서 기물 변화를 감지하지 못했습니다. 다시 시도하세요.")
+                # print("❌ CV에서 기물 변화를 감지하지 못했습니다. 다시 시도하세요.")
+                time.sleep(0.1)  # 짧은 대기
                 continue
                 
             print(f"📹 CV 감지 결과: {move_input}")
@@ -380,6 +410,26 @@ def main():
             game_over = True
             break
         
+        # 타이머 버튼 입력 확인 (수를 둔 후 턴 넘기기 신호)
+        button_signal = check_timer_button_press()
+        if button_signal:
+            current_turn = 'white' if current_board.turn == chess.WHITE else 'black'
+            previous_turn = 'black' if current_board.turn == chess.WHITE else 'white'
+            
+            # 이전 턴 플레이어가 버튼을 눌렀는지 확인 (수를 둔 후 턴 종료 신호)
+            if (button_signal == 'white_turn_end' and previous_turn == 'white') or \
+               (button_signal == 'black_turn_end' and previous_turn == 'black'):
+                print(f"🔘 {previous_turn} 플레이어가 수를 두고 타이머를 눌렀습니다!")
+                print(f"🔄 이제 {current_turn} 플레이어 차례입니다.")
+                time.sleep(1)
+            elif (button_signal == 'white_turn_end' and current_turn == 'white') or \
+                 (button_signal == 'black_turn_end' and current_turn == 'black'):
+                print(f"⚠️  {current_turn} 플레이어는 먼저 수를 두어야 합니다!")
+                time.sleep(1)
+            else:
+                print(f"⚠️  잘못된 타이밍입니다. 현재는 {current_turn} 차례입니다.")
+                time.sleep(1)
+        
         # 게임 종료 확인 (디버깅 정보 추가)
         if current_board.is_game_over():
             print(f"[DEBUG] 게임 종료 조건 만족!")
@@ -397,6 +447,10 @@ def main():
             if move == 'quit':
                 print("게임을 종료합니다.")
                 break
+            elif move == 'skip_turn':
+                print("⚠️  체스에서는 턴을 넘길 수 없습니다. 반드시 수를 두어야 합니다.")
+                print("🔄 다시 기물을 움직여주세요.")
+                continue
             
             try:
                 san_user = current_board.san(move)
@@ -444,7 +498,7 @@ def main():
                 time.sleep(0.5)
                 continue
         
-        time.sleep(1)
+        time.sleep(0.1)  # 타이머 버튼 확인을 위해 대기 시간 단축
     
     # 최종 보드 표시
     display_board()
