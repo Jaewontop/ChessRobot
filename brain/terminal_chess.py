@@ -46,7 +46,7 @@ from move_analyzer import (
     suggest_move,
     get_all_possible_moves
 )
-# from piece_detector import detect_move_and_update, initialize_board_with_picamera
+from piece_detector import detect_move_and_update, initialize_board_with_picamera, gen_edges_frames
 
 # Stockfish 경로
 STOCKFISH_PATH = '/usr/games/stockfish'
@@ -223,6 +223,67 @@ def check_timer_button_press():
         print(f"[DEBUG] 타이머 버튼 확인 오류: {e}")
     return None
 
+def detect_and_execute_cv_move():
+    """CV로 기물 변화를 감지하고 로봇으로 움직임을 실행"""
+    print("📹 CV 기물 변화 감지 시작...")
+    
+    try:
+        # CV로 기물 변화 감지 (detect_move_and_update 사용)
+        chess_coords = detect_move_and_update(threshold=12.0, top_k=4, max_attempts=30)
+        
+        if chess_coords and len(chess_coords) == 4:  # "e2e4" 형태
+            print(f"🎯 CV에서 감지된 이동: {chess_coords}")
+            
+            # 체스 좌표를 Move 객체로 변환
+            try:
+                from_square = chess_coords[:2]  # "e2"
+                to_square = chess_coords[2:]    # "e4"
+                
+                from_sq = chess.parse_square(from_square)
+                to_sq = chess.parse_square(to_square)
+                detected_move = chess.Move(from_sq, to_sq)
+                
+                # 유효한 이동인지 확인
+                if detected_move in current_board.legal_moves:
+                    print(f"✅ 유효한 이동 확인: {detected_move.uci()}")
+                    
+                    # 움직임 타입 분석
+                    move_type = analyze_move_with_context(current_board, detected_move)
+                    if move_type:
+                        move_desc = get_move_description(move_type, detected_move.uci())
+                        print(f"🤖 {move_desc} 실행 중...")
+                        
+                        # 로봇팔 명령 실행
+                        success = execute_robot_move(move_type, detected_move.uci())
+                        if success:
+                            robot_status = get_robot_status()
+                            if robot_status['is_connected']:
+                                print("✅ 로봇팔 명령 전송 성공")
+                                return detected_move
+                            else:
+                                print("✅ 명령 분석 완료 (로봇팔 미연결)")
+                                return detected_move
+                        else:
+                            print("❌ 로봇팔 명령 실행 실패")
+                            return None
+                    else:
+                        print("❌ 움직임 타입 분석 실패")
+                        return None
+                else:
+                    print(f"❌ 감지된 이동이 유효하지 않습니다: {detected_move.uci()}")
+                    return None
+                    
+            except Exception as e:
+                print(f"❌ 좌표 변환 오류: {e}")
+                return None
+        else:
+            print("❌ CV에서 유효한 이동을 감지하지 못했습니다")
+            return None
+            
+    except Exception as e:
+        print(f"❌ CV 감지 중 오류 발생: {e}")
+        return None
+
 def get_move_from_user():
     """키보드로 이동을 입력받음 (예: e2e4). 'quit'로 종료"""
     print("⌨️ 수를 입력하세요 (예: e2e4). 'quit'로 종료, Ctrl+C도 종료")
@@ -350,12 +411,12 @@ def main():
         status = get_chess_timer_status()
         print(f"[→] 타이머 상태: {status}")
 
-    # 첫 턴 전에 CV 기준값 초기화 (주석 처리: 수동 입력 모드)
-    # print("[→] 체스판 기준값 초기화(CV) 중...")
-    # if initialize_board_with_picamera():
-    #     print("[✓] 체스판 기준값 초기화 완료")
-    # else:
-    #     print("[!] 체스판 기준값 초기화 실패 - CV 감지 정확도가 낮을 수 있습니다")
+    # 첫 턴 전에 CV 기준값 초기화
+    print("[→] 체스판 기준값 초기화(CV) 중...")
+    if initialize_board_with_picamera():
+        print("[✓] 체스판 기준값 초기화 완료")
+    else:
+        print("[!] 체스판 기준값 초기화 실패 - CV 감지 정확도가 낮을 수 있습니다")
     
     # 플레이어 색상 선택
     while True:
@@ -402,6 +463,43 @@ def main():
             if (button_signal == 'white_turn_end' and previous_turn == 'white') or \
                (button_signal == 'black_turn_end' and previous_turn == 'black'):
                 print(f"🔘 {previous_turn} 플레이어가 수를 두고 타이머를 눌렀습니다!")
+                
+                # CV로 실제 이동을 감지하고 로봇으로 실행
+                detected_move = detect_and_execute_cv_move()
+                
+                if detected_move:
+                    # 감지된 이동을 보드에 적용
+                    current_board.push(detected_move)
+                    move_count += 1
+                    
+                    try:
+                        san_move = current_board.san(detected_move)
+                    except Exception:
+                        san_move = detected_move.uci()
+                    
+                    print(f"✅ CV 감지된 이동 적용: {detected_move.uci()} (SAN: {san_move})")
+                    
+                    # 로봇팔이 움직이는 중이면 대기
+                    if is_robot_moving():
+                        print("🤖 로봇팔이 움직이는 중입니다. 잠시 대기...")
+                        while is_robot_moving():
+                            time.sleep(0.5)
+                        print("🤖 로봇팔 움직임 완료!")
+                    
+                    # 시간 초과 검사
+                    if check_time_over():
+                        game_over = True
+                        break
+                    
+                    # 게임 종료 확인
+                    if current_board.is_game_over():
+                        print(f"[DEBUG] CV 이동 후 게임 종료: {describe_game_end(current_board)}")
+                        game_over = True
+                        break
+                else:
+                    print("❌ CV에서 유효한 이동을 감지하지 못했습니다. 수동 입력으로 진행합니다.")
+                    time.sleep(5)  # 사용자가 수동으로 입력할 시간 제공
+                
                 print(f"🔄 이제 {current_turn} 플레이어 차례입니다.")
                 time.sleep(1)
             elif (button_signal == 'white_turn_end' and current_turn == 'white') or \
