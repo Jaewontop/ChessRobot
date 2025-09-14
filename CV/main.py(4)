@@ -1,4 +1,4 @@
-# main.py
+# main.py (검은말의 검은칸->검은칸 인식 성공)
 from flask import Flask, Response, render_template_string
 import cv2
 import threading
