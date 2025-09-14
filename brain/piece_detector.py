@@ -156,6 +156,49 @@ def initialize_board(cap, save_path='init_board_values.npy'):
         print(f"[ERROR] 초기화 중 오류 발생: {e}")
         return False
 
+def initialize_board_with_picamera(save_path='/home/pi/Desktop/ChessRobot/brain/init_board_values.npy'):
+    """
+    Picamera2를 사용하여 현재 체스판의 기준값을 캡처/저장하는 편의 함수
+    """
+    try:
+        from picamera2 import Picamera2
+        picam2 = Picamera2()
+        cfg = picam2.create_preview_configuration(
+            main={"size": (640, 480), "format": "RGB888"},
+            controls={"FrameRate": 30}
+        )
+        picam2.configure(cfg)
+        picam2.start()
+
+        class PicamWrapper:
+            def __init__(self, picam2_instance):
+                self.picam2 = picam2_instance
+            def read(self):
+                try:
+                    rgb = self.picam2.capture_array()
+                    frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    return True, frame
+                except Exception:
+                    return False, None
+            def release(self):
+                try:
+                    self.picam2.stop()
+                except Exception:
+                    pass
+
+        cap = PicamWrapper(picam2)
+        try:
+            ok = initialize_board(cap, save_path=save_path)
+            return ok
+        finally:
+            cap.release()
+    except ImportError:
+        print("[ERROR] Picamera2 모듈을 찾을 수 없습니다. 'sudo apt install -y python3-picamera2'로 설치하세요.")
+        return False
+    except Exception as e:
+        print(f"[ERROR] initialize_board_with_picamera 오류: {e}")
+        return False
+
 def detect_piece_changes(cap, base_board_path='init_board_values.npy', threshold=None, top_k=None):
     """
     기물 변화를 감지하여 변화가 있는 칸들을 반환
@@ -191,8 +234,14 @@ def detect_piece_changes(cap, base_board_path='init_board_values.npy', threshold
     # 현재 프레임 캡처
     ret, frame = cap.read()
     if not ret:
-        print("[ERROR] 프레임을 읽을 수 없습니다.")
+        print(f"[ERROR] detect_piece_changes에서 프레임을 읽을 수 없습니다. ret={ret}")
         return []
+    
+    if frame is None:
+        print("[ERROR] 프레임이 None입니다.")
+        return []
+    
+    print(f"[DEBUG] detect_piece_changes: 프레임 크기 {frame.shape}")
     
     # 와핑
     lower = np.array([Hmin, Smin, Vmin], dtype=np.uint8)
@@ -239,13 +288,11 @@ def detect_piece_changes(cap, base_board_path='init_board_values.npy', threshold
     
     return changes
 
-def detect_move_and_update(cap=None, base_board_path='init_board_values.npy', threshold=None, top_k=None, max_attempts=50):
+def detect_move_and_update(threshold=None, top_k=None, max_attempts=50):
     """
     기물 변화를 감지하고 감지 후 새로운 기준값으로 업데이트하는 함수
     
     Args:
-        cap: OpenCV 캡처 객체 (None이면 내부에서 생성)
-        base_board_path: 기준값 파일 경로
         threshold: 변화 감지 임계값 (None이면 기본값 사용)
         top_k: 반환할 최대 변화 칸 수 (None이면 기본값 사용)
         max_attempts: 최대 시도 횟수 (기본 50프레임)
@@ -258,61 +305,114 @@ def detect_move_and_update(cap=None, base_board_path='init_board_values.npy', th
     if top_k is None:
         top_k = DEFAULT_TOP_K
     
-    # cap이 없으면 내부에서 생성
-    created_cap = False
-    if cap is None:
-        import cv2
-        cap = cv2.VideoCapture(0)
-        if not cap.isOpened():
-            print("[CV] 웹캠을 열 수 없습니다.")
-            return None
-        created_cap = True
+    # 절대 경로로 고정
+    base_board_path = '/home/pi/Desktop/ChessRobot/brain/init_board_values.npy'
+    
+    # Picamera2 캡처 객체 생성
+    import time
+    
+    print("[DEBUG] Picamera2 초기화 중...")
+    try:
+        from picamera2 import Picamera2
+        picam2 = Picamera2()
+        
+        # 설정
+        cfg = picam2.create_preview_configuration(
+            main={"size": (640, 480), "format": "RGB888"},
+            controls={"FrameRate": 30}
+        )
+        picam2.configure(cfg)
+        picam2.start()
+        
+        print("[DEBUG] Picamera2 초기화 완료")
+        
+        # 캡처 래퍼 클래스 생성
+        class PicamWrapper:
+            def __init__(self, picam2_instance):
+                self.picam2 = picam2_instance
+                
+            def read(self):
+                try:
+                    rgb = self.picam2.capture_array()
+                    frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                    return True, frame
+                except Exception as e:
+                    print(f"[DEBUG] 프레임 읽기 실패: {e}")
+                    return False, None
+                    
+            def release(self):
+                try:
+                    self.picam2.stop()
+                except Exception:
+                    pass
+        
+        cap = PicamWrapper(picam2)
+        
+        # 몇 프레임 테스트
+        print("[DEBUG] Picamera2 프레임 테스트...")
+        for i in range(3):
+            ret, frame = cap.read()
+            print(f"[DEBUG] 프레임 {i+1}: ret={ret}, frame_shape={frame.shape if ret and frame is not None else 'None'}")
+            if not ret:
+                print(f"[CV] Picamera2 초기화 실패 (프레임 {i+1})")
+                cap.release()
+                return None
+            time.sleep(0.1)
+            
+    except ImportError:
+        print("[ERROR] Picamera2를 import할 수 없습니다. 설치가 필요합니다.")
+        return None
+    except Exception as e:
+        print(f"[ERROR] Picamera2 초기화 실패: {e}")
+        return None
     
     print(f"[CV] 기물 변화 감지 시작... (최대 {max_attempts}프레임 확인)")
     
     try:
         for attempt in range(max_attempts):
+            print(f"[DEBUG] 시도 {attempt+1}/{max_attempts}")
             # 현재 프레임과 기준값 비교
             changes = detect_piece_changes(cap, base_board_path, threshold, top_k)
-        
-        if len(changes) >= 2:
-            # 두 칸 변화 감지됨 - 체스 좌표로 변환
-            i1, j1, diff1 = changes[0]
-            i2, j2, diff2 = changes[1]
+            print(f"[DEBUG] 감지된 변화 수: {len(changes)}")
             
-            coord1 = coord_to_chess_notation(i1, j1)
-            coord2 = coord_to_chess_notation(i2, j2)
-            chess_coords = f"{coord1}{coord2}"
-            
-            print(f"[CV] 기물 변화 감지! {chess_coords} (차이값: {diff1:.1f}, {diff2:.1f})")
-            
-            # 감지 후 새로운 기준값으로 업데이트
-            print("[CV] 새로운 기준값으로 업데이트 중...")
-            if initialize_board(cap, base_board_path):
-                print("[CV] 기준값 업데이트 완료!")
-            else:
-                print("[CV] 기준값 업데이트 실패")
-            
-            return chess_coords
-            
-        elif len(changes) == 1:
-            # 한 칸만 변화 감지됨
-            i, j, diff = changes[0]
-            coord = coord_to_chess_notation(i, j)
-            
-            print(f"[CV] 한 칸 변화 감지: {coord} (차이값: {diff:.1f})")
-            # 한 칸만 변화된 경우는 기준값 업데이트하지 않음
-            
-        # 약간 대기
-        import time
-        time.sleep(0.05)  # 50ms 대기
+            if len(changes) >= 2:
+                # 두 칸 변화 감지됨 - 체스 좌표로 변환
+                i1, j1, diff1 = changes[0]
+                i2, j2, diff2 = changes[1]
+                
+                coord1 = coord_to_chess_notation(i1, j1)
+                coord2 = coord_to_chess_notation(i2, j2)
+                chess_coords = f"{coord1}{coord2}"
+                
+                print(f"[CV] 기물 변화 감지! {chess_coords} (차이값: {diff1:.1f}, {diff2:.1f})")
+                
+                # 감지 후 새로운 기준값으로 업데이트
+                print("[CV] 새로운 기준값으로 업데이트 중...")
+                if initialize_board(cap, base_board_path):
+                    print("[CV] 기준값 업데이트 완료!")
+                else:
+                    print("[CV] 기준값 업데이트 실패")
+                
+                return chess_coords
+                
+            elif len(changes) == 1:
+                # 한 칸만 변화 감지됨
+                i, j, diff = changes[0]
+                coord = coord_to_chess_notation(i, j)
+                
+                print(f"[CV] 한 칸 변화 감지: {coord} (차이값: {diff:.1f})")
+                # 한 칸만 변화된 경우는 기준값 업데이트하지 않음
+                
+            # 약간 대기
+            import time
+            time.sleep(0.05)  # 50ms 대기
         
         print(f"[CV] {max_attempts}프레임 확인했지만 유효한 변화를 감지하지 못했습니다.")
         return None
         
     finally:
-        # cap을 내부에서 생성했으면 해제
-        if created_cap and cap is not None:
+        # 캡처 객체 해제
+        if cap is not None:
             cap.release()
 
 def gen_edges_frames(cap, base_board_path='init_board_values.npy', threshold=None, top_k=None):
@@ -443,18 +543,65 @@ def gen_edges_frames(cap, base_board_path='init_board_values.npy', threshold=Non
         
         yield (frame_data, chess_coords)
 
+def test_webcam():
+    """Picamera2 기본 테스트"""
+    import time
+    
+    print("[TEST] Picamera2 테스트 시작...")
+    
+    try:
+        from picamera2 import Picamera2
+        picam2 = Picamera2()
+        
+        print("[TEST] Picamera2 초기화 중...")
+        cfg = picam2.create_preview_configuration(
+            main={"size": (640, 480), "format": "RGB888"},
+            controls={"FrameRate": 30}
+        )
+        picam2.configure(cfg)
+        picam2.start()
+        
+        print("[TEST] Picamera2 초기화 완료")
+        
+        # 프레임 5개 읽어보기
+        success_count = 0
+        for i in range(5):
+            try:
+                rgb = picam2.capture_array()
+                frame = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+                success_count += 1
+                print(f"[TEST] 프레임 {i+1}: ✅ shape={frame.shape}")
+            except Exception as e:
+                print(f"[TEST] 프레임 {i+1}: ❌ 오류={e}")
+            time.sleep(0.2)
+        
+        picam2.stop()
+        
+        print(f"[TEST] Picamera2 테스트 완료 - 성공률: {success_count}/5")
+        return success_count > 0
+        
+    except ImportError:
+        print("[TEST] ❌ Picamera2를 import할 수 없습니다!")
+        return False
+    except Exception as e:
+        print(f"[TEST] ❌ Picamera2 초기화 실패: {e}")
+        return False
+
 # ===================== 사용 예시 =====================
 if __name__ == "__main__":
     # 테스트용 코드
     print("체스 기물 감지 모듈 테스트")
     print("사용 가능한 함수들:")
+    print("- test_webcam(): 웹캠 기본 테스트")
     print("- initialize_board(cap, save_path): 체스판 초기화")
     print("- detect_piece_changes(cap, base_board_path): 기물 변화 감지")
-    print("- detect_move_and_update(cap, base_board_path): 변화 감지 + 기준값 업데이트")
+    print("- detect_move_and_update(): 변화 감지 + 기준값 업데이트")
     print("- gen_edges_frames(cap, base_board_path): 변화 시각화 스트리밍")
     print("\n사용법:")
-    print("# 기준값 업데이트 방식:")
-    print("chess_coords = detect_move_and_update(cap)")
+    print("# 웹캠 테스트:")
+    print("test_webcam()")
+    print("\n# 기준값 업데이트 방식:")
+    print("chess_coords = detect_move_and_update()")
     print("if chess_coords:")
     print("    print(f'감지된 이동: {chess_coords}')")
     print("\n# 스트리밍 방식:")

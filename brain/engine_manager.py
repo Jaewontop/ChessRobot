@@ -11,8 +11,8 @@ import os
 import math
 import chess
 import chess.engine
-#STOCKFISH_PATH = '/usr/games/stockfish'
-STOCKFISH_PATH = '/opt/homebrew/bin/stockfish'
+STOCKFISH_PATH = '/usr/games/stockfish'
+#STOCKFISH_PATH = '/opt/homebrew/bin/stockfish'
 
 
 class _EngineManager:

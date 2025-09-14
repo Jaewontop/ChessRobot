@@ -46,11 +46,11 @@ from move_analyzer import (
     suggest_move,
     get_all_possible_moves
 )
-from piece_detector import detect_move_and_update
+# from piece_detector import detect_move_and_update, initialize_board_with_picamera
 
 # Stockfish 경로
-#STOCKFISH_PATH = '/usr/games/stockfish'
-STOCKFISH_PATH = '/opt/homebrew/bin/stockfish'
+STOCKFISH_PATH = '/usr/games/stockfish'
+#STOCKFISH_PATH = '/opt/homebrew/bin/stockfish'
 
 # 모니터링 서버 설정
 MONITOR_SERVER_URL = 'http://localhost:5002'
@@ -224,70 +224,45 @@ def check_timer_button_press():
     return None
 
 def get_move_from_user():
-    """CV로 기물 이동 자동 감지 (타이머 버튼으로 턴 넘기기 가능)"""
-    print("📹 체스판에서 기물을 움직여주세요... (타이머 버튼으로 턴 넘기기, Ctrl+C로 게임 종료)")
-    
+    """키보드로 이동을 입력받음 (예: e2e4). 'quit'로 종료"""
+    print("⌨️ 수를 입력하세요 (예: e2e4). 'quit'로 종료, Ctrl+C도 종료")
     while True:
         try:
-            # 타이머 버튼 입력 확인 (턴 넘기기)
+            # 선택적으로 타이머 버튼 상태를 확인해 경고만 제공
             button_signal = check_timer_button_press()
             if button_signal:
                 current_turn = 'white' if current_board.turn == chess.WHITE else 'black'
-                
-                # 현재 턴 플레이어가 버튼을 누르면 턴 넘기기
-                if (button_signal == 'white_turn_end' and current_turn == 'white') or \
-                   (button_signal == 'black_turn_end' and current_turn == 'black'):
-                    print(f"🔘 {current_turn} 플레이어가 타이머를 눌러 턴을 넘겼습니다!")
-                    return 'skip_turn'
-                else:
-                    print(f"⚠️  잘못된 타이밍입니다. 현재는 {current_turn} 차례입니다.")
-            
-            # CV로 기물 변화 감지
-            move_input = detect_move_and_update(None, '../CV/init_board_values.npy')
-            
-            if not move_input:
-                # print("❌ CV에서 기물 변화를 감지하지 못했습니다. 다시 시도하세요.")
-                time.sleep(0.1)  # 짧은 대기
-                continue
-                
-            print(f"📹 CV 감지 결과: {move_input}")
-            
-            if len(move_input) == 4:
-                # 두 좌표 추출
-                coord1 = move_input[:2]
-                coord2 = move_input[2:]
-                
-                # 움직임 분석 (순서 자동 판단)
-                #TODO: CV에서 coord1,coord2 받아와서 집어넣기 a1,a2
-                move_tuple = analyze_coordinates(current_board, coord1, coord2)
-                
-                if move_tuple:
-                    from_square, to_square = move_tuple
-                    
-                    # 분석 결과 표시
-                    suggestion = suggest_move(current_board, coord1, coord2)
-                    print(f"🤖 {suggestion}")
-                    
-                    # 이동 유효성 검사
-                    from_sq = chess.parse_square(from_square)
-                    to_sq = chess.parse_square(to_square)
-                    move = chess.Move(from_sq, to_sq)
-                    
-                    if move in current_board.legal_moves:
-                        return move
+                print(f"⚠️ 타이머 입력 감지: {button_signal}. 현재는 {current_turn} 차례입니다.")
+
+            user_input = input("이동 입력 (e2e4): ").strip().lower()
+            if user_input in ['q', 'quit', 'exit']:
+                return 'quit'
+
+            if len(user_input) == 4:
+                coord1 = user_input[:2]
+                coord2 = user_input[2:]
+
+                # 좌표 유효성
+                files = 'abcdefgh'
+                ranks = '12345678'
+                if coord1[0] in files and coord2[0] in files and \
+                   coord1[1] in ranks and coord2[1] in ranks:
+                    move_tuple = analyze_coordinates(current_board, coord1, coord2)
+                    if move_tuple:
+                        from_square, to_square = move_tuple
+                        from_sq = chess.parse_square(from_square)
+                        to_sq = chess.parse_square(to_square)
+                        move = chess.Move(from_sq, to_sq)
+                        if move in current_board.legal_moves:
+                            return move
+                        else:
+                            print("❌ 잘못된 이동입니다!")
                     else:
-                        print("❌ 잘못된 이동입니다!")
+                        print("❌ 유효하지 않은 움직임입니다!")
                 else:
-                    print("❌ 유효하지 않은 움직임입니다!")
-                    print("💡 가능한 움직임들:")
-                    possible_moves = get_all_possible_moves(current_board)
-                    for i, move_info in enumerate(possible_moves[:5], 1):  # 상위 5개만 표시
-                        print(f"   {i}. {move_info['piece']}: {move_info['from']} → {move_info['to']} ({move_info['type']})")
-                    if len(possible_moves) > 5:
-                        print(f"   ... 총 {len(possible_moves)}개 움직임 가능")
+                    print("❌ 올바른 형식으로 입력하세요 (예: e2e4)")
             else:
-                print("❌ 올바른 형식으로 입력하세요 (예: e2e4 또는 e4e2)")
-                
+                print("❌ 올바른 형식으로 입력하세요 (예: e2e4)")
         except ValueError:
             print("❌ 잘못된 좌표입니다!")
         except KeyboardInterrupt:
@@ -374,6 +349,13 @@ def main():
         # 타이머 상태 확인
         status = get_chess_timer_status()
         print(f"[→] 타이머 상태: {status}")
+
+    # 첫 턴 전에 CV 기준값 초기화 (주석 처리: 수동 입력 모드)
+    # print("[→] 체스판 기준값 초기화(CV) 중...")
+    # if initialize_board_with_picamera():
+    #     print("[✓] 체스판 기준값 초기화 완료")
+    # else:
+    #     print("[!] 체스판 기준값 초기화 실패 - CV 감지 정확도가 낮을 수 있습니다")
     
     # 플레이어 색상 선택
     while True:
