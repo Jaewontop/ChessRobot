@@ -33,7 +33,7 @@ int RobotArmIK::angleToPulse(float angle) {
 }
 
 void RobotArmIK::moveTo(float x, float y, float z) {
-  float theta_shoulder_rad = atan2(y, x);
+  float theta_shoulder_rad = M_PI - atan2(y, x);
   float d = sqrt(pow(x, 2) + pow(y, 2));
 
   float distance = sqrt(pow(d, 2) + pow(z, 2));
