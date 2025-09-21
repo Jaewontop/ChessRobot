@@ -47,7 +47,7 @@ void RobotArmIK::moveTo(float x, float y, float z) {
 
   float k1 = L1 + L2 * cos(theta_lower_rad);
   float k2 = L2 * sin(theta_lower_rad);
-  float theta_upper_rad = atan2(z, d) - atan2(k2, k1);
+  float theta_upper_rad = M_PI - atan2(z, d) - atan2(k2, k1); // theta 값 연산 실수 수정
 
   float theta_shoulder_deg = theta_shoulder_rad * 180.0 / M_PI;
   float theta_upper_deg = theta_upper_rad * 180.0 / M_PI;
