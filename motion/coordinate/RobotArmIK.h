@@ -11,7 +11,7 @@ public:
   RobotArmIK(Adafruit_PWMServoDriver* pwm,
              uint8_t channel_shoulder, uint8_t channel_upper,
              uint8_t channel_lower, uint8_t channel_grip,
-             float L1, float L2
+             float L1, float L2,
              int servoMins[NUM_SERVOS], int servoMaxs[NUM_SERVOS]);
 
   void begin();
