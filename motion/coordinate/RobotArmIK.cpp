@@ -2,16 +2,14 @@
 #include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 
-// 서보의 0도와 180도에 해당하는 펄스 길이 (틱 단위)
-// 이 값은 사용하는 서보 모터에 따라 미세 조정이 필요할 수 있습니다.
-#define SERVOMIN 150
-#define SERVOMAX 600
+#define NUM_SERVOS 4  // 사용하는 모터 개수 (어깨, 상박, 하박, 그리퍼)
 
-// 생성자: 드라이버 객체 포인터와 각 서보의 '채널 번호'를 받습니다.
+// 생성자: 드라이버 객체 포인터와 각 서보의 '채널 번호'와 서보별 min/max 값을 입력받습니다.
 RobotArmIK::RobotArmIK(Adafruit_PWMServoDriver* pwm,
                      uint8_t channel_shoulder, uint8_t channel_upper,
                      uint8_t channel_lower, uint8_t channel_grip,
-                     float L1, float L2) {
+                     float L1, float L2,
+                     int servoMins[NUM_SERVOS], int servoMaxs[NUM_SERVOS]) {
   this->pwm = pwm;
   this->channel_shoulder = channel_shoulder;
   this->channel_upper = channel_upper;
@@ -19,7 +17,15 @@ RobotArmIK::RobotArmIK(Adafruit_PWMServoDriver* pwm,
   this->channel_grip = channel_grip;
   this->L1 = L1;
   this->L2 = L2;
+
+   // [추가] 배열 복사
+  for (int i = 0; i < NUM_SERVOS; i++) {
+    this->servoMins[i] = servoMins[i];
+    this->servoMaxs[i] = servoMaxs[i];
+  }
 }
+
+  
 
 // 이 클래스에서는 특별히 할 일이 없으므로 비워둡니다.
 // 드라이버 초기화는 메인 .ino 파일에서 수행합니다.
@@ -27,9 +33,19 @@ void RobotArmIK::begin() {
   // pwm->begin(); // 드라이버 시작 코드는 setup()에서 한 번만 호출하는 것이 좋습니다.
 }
 
-// 각도를 펄스 길이(틱)로 변환하는 내부 헬퍼 함수
-int RobotArmIK::angleToPulse(float angle) {
-  return map(angle, 0, 180, SERVOMIN, SERVOMAX);
+
+
+// 각도를 펄스로 변환 (채널별 개별 min/max 적용)
+int RobotArmIK::angleToPulse(uint8_t channel, float angle) {
+  int idx = 0;
+
+  // 채널 번호에 따라 배열 인덱스 결정
+  if (channel == channel_shoulder) idx = 0;
+  else if (channel == channel_upper) idx = 1;
+  else if (channel == channel_lower) idx = 2;
+  else if (channel == channel_grip) idx = 3;
+
+  return map(angle, 0, 180, servoMins[idx], servoMaxs[idx]);
 }
 
 void RobotArmIK::moveTo(float x, float y, float z) {
@@ -59,10 +75,10 @@ void RobotArmIK::moveTo(float x, float y, float z) {
   float upper_angle    = constrain(theta_upper_deg, 0, 180);
   float lower_angle    = constrain(theta_lower_deg, 0, 180);
 
-  // 변환된 각도를 펄스 값으로 바꿔 서보 드라이버에 명령
-  pwm->setPWM(channel_shoulder, 0, angleToPulse(shoulder_angle));
-  pwm->setPWM(channel_upper,    0, angleToPulse(upper_angle));
-  pwm->setPWM(channel_lower,    0, angleToPulse(lower_angle));
+  // [수정] 채널 포함해서 호출
+  pwm->setPWM(channel_shoulder, 0, angleToPulse(channel_shoulder, shoulder_angle));
+  pwm->setPWM(channel_upper,    0, angleToPulse(channel_upper, upper_angle));
+  pwm->setPWM(channel_lower,    0, angleToPulse(channel_lower, lower_angle));
 }
 
 // 그리퍼 열기
