@@ -36,7 +36,7 @@ void RobotArmIK::begin() {
 
 
 // 각도를 펄스로 변환 (채널별 개별 min/max 적용)
-int RobotArmIK::angleToPulse(uint8_t channel, float angle) {
+float RobotArmIK::angleToPulse(uint8_t channel, float angle) {
   int idx = 0;
 
   // 채널 번호에 따라 배열 인덱스 결정
