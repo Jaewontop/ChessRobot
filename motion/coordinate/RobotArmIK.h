@@ -27,6 +27,9 @@ private:
 
   // 로봇팔 링크 길이
   float L1, L2;
+  
+  int servoMins[NUM_SERVOS];
+  int servoMaxs[NUM_SERVOS];
 
   // 각도를 펄스 길이로 변환하는 내부 함수
   int angleToPulse(uint8_t channel, float angle);
