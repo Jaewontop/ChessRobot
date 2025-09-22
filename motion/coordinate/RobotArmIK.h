@@ -3,13 +3,16 @@
 
 #include <Adafruit_PWMServoDriver.h>
 
+#define NUM_SERVOS 4  // 모터 개수 (어깨, 상박, 하박, 그리퍼)
+
 class RobotArmIK {
 public:
   // 생성자
   RobotArmIK(Adafruit_PWMServoDriver* pwm,
              uint8_t channel_shoulder, uint8_t channel_upper,
              uint8_t channel_lower, uint8_t channel_grip,
-             float L1, float L2);
+             float L1, float L2
+             int servoMins[NUM_SERVOS], int servoMaxs[NUM_SERVOS]);
 
   void begin();
   void moveTo(float x, float y, float z);
@@ -26,7 +29,7 @@ private:
   float L1, L2;
 
   // 각도를 펄스 길이로 변환하는 내부 함수
-  int angleToPulse(float angle);
+  int angleToPulse(uint8_t channel, float angle);
 };
 
 #endif
