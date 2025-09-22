@@ -33,7 +33,7 @@ int RobotArmIK::angleToPulse(float angle) {
 }
 
 void RobotArmIK::moveTo(float x, float y, float z) {
-  float theta_shoulder_rad = M_PI - atan2(y, x);
+  float theta_shoulder_rad = atan2(y, x);
   float d = sqrt(pow(x, 2) + pow(y, 2));
 
   float distance = sqrt(pow(d, 2) + pow(z, 2));
@@ -42,8 +42,8 @@ void RobotArmIK::moveTo(float x, float y, float z) {
     return;
   }
 
-  float cos_theta2 = (pow(d, 2) + pow(z, 2) - pow(L1, 2) - pow(L2, 2)) / (2 * L1 * L2);
-  float theta_lower_rad = -acos(cos_theta2);
+  float cos_theta2 = (pow(L1, 2) - pow(L2, 2) - pow(d, 2) + pow(z, 2)) / (2 * L1 * L2);
+  float theta_lower_rad = acos(cos_theta2);
 
   float k1 = L1 + L2 * cos(theta_lower_rad);
   float k2 = L2 * sin(theta_lower_rad);
@@ -55,9 +55,9 @@ void RobotArmIK::moveTo(float x, float y, float z) {
 
   // [중요] 계산된 각도를 실제 서보 모터의 0~180도 범위로 변환
   // 이 부분은 실제 로봇팔의 조립 상태에 맞춰 수정이 필요합니다.
-  float shoulder_angle = constrain(90 + theta_shoulder_deg, 0, 180);
-  float upper_angle    = constrain(180 - theta_upper_deg, 0, 180);
-  float lower_angle    = constrain(180 + theta_lower_deg, 0, 180);
+  float shoulder_angle = constrain(theta_shoulder_deg, 0, 180);
+  float upper_angle    = constrain(theta_upper_deg, 0, 180);
+  float lower_angle    = constrain(theta_lower_deg, 0, 180);
 
   // 변환된 각도를 펄스 값으로 바꿔 서보 드라이버에 명령
   pwm->setPWM(channel_shoulder, 0, angleToPulse(shoulder_angle));
