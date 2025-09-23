@@ -58,7 +58,7 @@ void RobotArmIK::moveTo(float x, float y, float z) {
     return;
   }
 
-  float cos_theta2 = (pow(L1, 2) - pow(L2, 2) - pow(d, 2) + pow(z, 2)) / (2 * L1 * L2);
+  float cos_theta2 = (pow(L1, 2) + pow(L2, 2) - pow(d, 2) - pow(z, 2)) / (2 * L1 * L2);
   float theta_lower_rad = acos(cos_theta2);
 
   float k1 = L1 + L2 * cos(theta_lower_rad);
