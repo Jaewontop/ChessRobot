@@ -32,7 +32,7 @@ private:
   int servoMaxs[NUM_SERVOS];
 
   // 각도를 펄스 길이로 변환하는 내부 함수
-  int angleToPulse(uint8_t channel, float angle);
+  float angleToPulse(uint8_t channel, float angle);
 };
 
 #endif

@@ -61,8 +61,8 @@ void RobotArmIK::moveTo(float x, float y, float z) {
   float cos_theta2 = (pow(L1, 2) + pow(L2, 2) - pow(d, 2) - pow(z, 2)) / (2 * L1 * L2);
   float theta_lower_rad = acos(cos_theta2);
 
-  float k1 = L1 + L2 * cos(theta_lower_rad);
-  float k2 = L2 * sin(theta_lower_rad);
+  float k1 = L1 + L2 * cos(M_PI-theta_lower_rad);
+  float k2 = L2 * sin(M_PI-theta_lower_rad);
   float theta_upper_rad = M_PI - atan2(z, d) - atan2(k2, k1); // theta 값 연산 실수 수정
 
   float theta_shoulder_deg = theta_shoulder_rad * 180.0 / M_PI;
@@ -75,10 +75,26 @@ void RobotArmIK::moveTo(float x, float y, float z) {
   float upper_angle    = constrain(theta_upper_deg, 0, 180);
   float lower_angle    = constrain(theta_lower_deg, 0, 180);
 
+  // PWM 값 계산
+  int pwm_shoulder = angleToPulse(channel_shoulder, shoulder_angle);
+  int pwm_upper    = angleToPulse(channel_upper, upper_angle);
+  int pwm_lower    = angleToPulse(channel_lower, lower_angle);
+
+  // 디버깅용 로그 추가
+  Serial.print("[moveTo] x: "); Serial.print(x);
+  Serial.print(", y: "); Serial.print(y);
+  Serial.print(", z: "); Serial.print(z);
+  Serial.print(" | shoulder_angle: "); Serial.print(shoulder_angle);
+  Serial.print(", upper_angle: "); Serial.print(upper_angle);
+  Serial.print(", lower_angle: "); Serial.print(lower_angle);
+  Serial.print(" | pwm_shoulder: "); Serial.print(pwm_shoulder);
+  Serial.print(", pwm_upper: "); Serial.print(pwm_upper);
+  Serial.print(", pwm_lower: "); Serial.println(pwm_lower);
+
   // [수정] 채널 포함해서 호출
-  pwm->setPWM(channel_shoulder, 0, angleToPulse(channel_shoulder, shoulder_angle));
-  pwm->setPWM(channel_upper,    0, angleToPulse(channel_upper, upper_angle));
-  pwm->setPWM(channel_lower,    0, angleToPulse(channel_lower, lower_angle));
+  pwm->setPWM(channel_shoulder, 0, pwm_shoulder);
+  pwm->setPWM(channel_upper,    0, pwm_upper);
+  pwm->setPWM(channel_lower,    0, pwm_lower);
 }
 
 // 그리퍼 열기
