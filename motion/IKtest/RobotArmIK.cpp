@@ -25,6 +25,8 @@ RobotArmIK::RobotArmIK(Adafruit_PWMServoDriver* pwm,
   }
 }
 
+
+
   
 
 // 이 클래스에서는 특별히 할 일이 없으므로 비워둡니다.
@@ -32,6 +34,7 @@ RobotArmIK::RobotArmIK(Adafruit_PWMServoDriver* pwm,
 void RobotArmIK::begin() {
   // pwm->begin(); // 드라이버 시작 코드는 setup()에서 한 번만 호출하는 것이 좋습니다.
 }
+
 
 
 
