@@ -102,10 +102,12 @@ void RobotArmIK::moveTo(float x, float y, float z) {
 
 // 그리퍼 열기
 void RobotArmIK::gripOpen() {
-  pwm->setPWM(channel_grip,  0, angleToPulse(channel_grip, 52));   // 0도에 해당하는 펄스 값
+  pwm->setPWM(channel_grip,  0, angleToPulse(channel_grip, 0));   // 0도에 해당하는 펄스 값
+  pwm->setPWM(channel_lower, 0, angleToPulse(channel_grip, 0)); // 다시 올라옴
 }
 
 // 그리퍼 닫기
 void RobotArmIK::gripClose() {
-  pwm->setPWM(channel_grip,  0, angleToPulse(channel_grip, 46));  // 90도에 해당하는 펄스 값
+  pwm->setPWM(channel_grip,  0, angleToPulse(channel_grip, 90));  // 90도에 해당하는 펄스 값
+  pwm->setPWM(channel_lower, 0, angleToPulse(channel_grip, 0));  // 다시 올라옴
 }

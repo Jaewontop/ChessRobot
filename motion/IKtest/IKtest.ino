@@ -25,8 +25,8 @@ const float L1 = 300.0;
 const float L2 = 365.0;
 
 // 서보별 MIN/MAX 값
-int servoMins[NUM_SERVOS] = {85, 85, 75, 0}; // 각 서보 최소 펄스
-int servoMaxs[NUM_SERVOS] = {450, 450, 445, 0}; // 각 서보 최대 펄스
+int servoMins[NUM_SERVOS] = {85, 85, 75, 46}; // 각 서보 최소 펄스
+int servoMaxs[NUM_SERVOS] = {450, 450, 445, 52}; // 각 서보 최대 펄스
 
 // 각 칸의 좌표 (로봇팔 구동부 기준, 0,0이 원점, 각 칸의 중점)
 float X[8] = {
@@ -128,7 +128,7 @@ void setup()
   // robotArm.begin(); // 라이브러리의 begin()은 현재 비어있으므로 생략 가능
     Serial.println("체스 로봇 좌표 시스템 초기화 완료");
 
-  robotArm.moveTo(50,50,40); // 시작 준비 자세
+  robotArm.moveTo(365,0,330); // 시작 준비 자세
   delay(2000);
 }
 
@@ -174,7 +174,7 @@ void loop() {
     if (isZero) {
       // 제로 포지션으로 복귀
       Serial.println("ZERO 명령 수신: 제로 포지션으로 이동");
-      robotArm.moveTo(50, 50, 40); // setup에서 사용한 준비 자세와 동일
+      robotArm.moveTo(365, 0, 330); // setup에서 사용한 준비 자세와 동일
       delay(1000);
     }
     // 전체 이동 명령 처리 ("e2e4"처럼 from → to)
@@ -236,29 +236,6 @@ void loop() {
         robotArm.gripOpen();  delay(1000);
       }
     }
-  // // x 입력
-  // Serial.println("x좌표:");
-  // while (!Serial.available());             // 입력 대기
-  // String xcor = Serial.readStringUntil('\n');
-  // xcor.trim();
-  // x = xcor.toFloat();
-
-  // // y 입력
-  // Serial.println("y좌표:");
-  // while (!Serial.available());
-  // String ycor = Serial.readStringUntil('\n');
-  // ycor.trim();
-  // y = ycor.toFloat();
-
-  // // z 입력
-  // Serial.println("z좌표:");
-  // while (!Serial.available());
-  // String zcor = Serial.readStringUntil('\n');
-  // zcor.trim();
-  // z = zcor.toFloat();
-
-  // 실제 로봇팔 제어 (객체 이름 주의!)
-
   delay(500);  // 입력 템포 조절
   }
 }
