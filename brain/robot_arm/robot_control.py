@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import time
 
-import game_state
-from robot_arm_controller import (
+from game import game_state
+from robot_arm.robot_arm_controller import (
     execute_robot_move,
     get_move_description,
     get_robot_status,

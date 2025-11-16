@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from timer_manager import (
+from timer.timer_manager import (
     check_timer_button,
     get_black_timer,
     get_timer_manager,

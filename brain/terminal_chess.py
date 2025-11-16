@@ -7,14 +7,14 @@ from __future__ import annotations
 다른 모듈에 분산된 기능을 초기화하고 메인 루프를 실행한다.
 """
 
-from game_flow import cleanup_game, game_loop, initialize_game
-from game_state import reset_game_state
+from game.game_flow import cleanup_game, game_loop, initialize_game
+from game.game_state import reset_game_state
 
 STOCKFISH_PATH = "/usr/games/stockfish"
 # STOCKFISH_PATH = "/opt/homebrew/bin/stockfish"
 
 MONITOR_SERVER_URL = "http://localhost:5002"
-ENABLE_MONITORING = True
+ENABLE_MONITORING = True 
 
 
 def main() -> None:

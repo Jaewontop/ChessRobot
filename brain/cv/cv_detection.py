@@ -5,8 +5,8 @@ from typing import Any, Optional
 
 import chess
 
-import game_state
-from cv_manager import (
+from game import game_state
+from cv.cv_manager import (
     coord_to_chess_notation,
     process_turn_transition,
     save_initial_board_from_capture,

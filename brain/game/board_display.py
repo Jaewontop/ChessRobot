@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import chess
 
-import game_state
-from engine_manager import evaluate_position
-from robot_arm_controller import get_robot_status, is_robot_moving
-from timer_manager import get_timer_display
+from game import game_state
+from engine.engine_manager import evaluate_position
+from robot_arm.robot_arm_controller import get_robot_status, is_robot_moving
+from timer.timer_manager import get_timer_display
 
 
 def display_board() -> None:

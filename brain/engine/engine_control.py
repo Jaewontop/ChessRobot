@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import chess
 
-import game_state
-from engine_manager import engine_make_best_move, evaluate_position
-from game_utils import describe_game_end
-from robot_control import perform_robot_move
+from game import game_state
+from engine.engine_manager import engine_make_best_move, evaluate_position
+from game.game_utils import describe_game_end
+from robot_arm.robot_control import perform_robot_move
 
 
 def get_stockfish_response_move() -> chess.Move | None:

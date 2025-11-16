@@ -21,41 +21,49 @@ import cv2
 import numpy as np
 from flask import Flask, Response, render_template_string, request, jsonify
 
-from . import cv_manager
+from cv import cv_manager
 
 BASE_DIR = Path(__file__).resolve().parent
 
 
-class PiCam2Capture:
-    """Picamera2를 VideoCapture처럼 사용하기 위한 래퍼."""
+class USBCapture:
+    """USB 카메라를 위한 간단 래퍼 (cv2.VideoCapture 기반).
 
-    def __init__(self, size=(1280, 720), fps=30, hflip=False, vflip=False):
-        from picamera2 import Picamera2
+    rotate_180=True 이면 영상이 뒤집혀 있을 때 180도 회전 보정.
+    기본값은 False (카메라가 이미 올바른 방향이라는 가정).
+    """
 
-        self._picam2 = Picamera2()
-        self._hflip = hflip
-        self._vflip = vflip
-        cfg = self._picam2.create_preview_configuration(
-            main={"size": size, "format": "RGB888"},
-            controls={"FrameRate": fps},
-        )
-        self._picam2.configure(cfg)
-        self._picam2.start()
+    def __init__(self, index: int = 0, size=(1280, 720), fps: int = 30, rotate_180: bool = False):
+        # GStreamer 대신 V4L2 백엔드를 명시적으로 사용해 본다.
+        self._cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+        self._rotate_180 = rotate_180
+        if not self._cap.isOpened():
+            print(f"[USBCapture] /dev/video{index} 를 열 수 없습니다.")
+        try:
+            self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+            self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+            self._cap.set(cv2.CAP_PROP_FPS, fps)
+        except Exception as e:
+            print(f"[USBCapture] 카메라 속성 설정 실패: {e}")
 
     def read(self):
-        rgb = self._picam2.capture_array()
-        bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
-        if self._hflip:
-            bgr = cv2.flip(bgr, 1)
-        if self._vflip:
-            bgr = cv2.flip(bgr, 0)
-        return True, bgr
+        ret, frame = self._cap.read()
+        if not ret or frame is None:
+            print("[USBCapture] frame read 실패")
+            return ret, frame
+
+        # 카메라가 180도 뒤집혀 있을 때 보정
+        if self._rotate_180:
+            frame = cv2.rotate(frame, cv2.ROTATE_180)
+
+        return True, frame
 
     def release(self):
-        try:
-            self._picam2.stop()
-        except Exception:
-            pass
+        if self._cap is not None:
+            try:
+                self._cap.release()
+            except Exception:
+                pass
 
 
 class ThreadSafeCapture:
@@ -103,10 +111,18 @@ def build_app(state: Dict[str, Any]) -> Flask:
     pkl_path: Path = state["pkl_path"]
 
     def capture_frame() -> Optional[np.ndarray]:
-        ret, frame = cap.read()
-        if not ret or frame is None:
+        """항상 가능한 한 최신 프레임을 반환하도록 버퍼를 조금 비운 뒤 마지막 프레임을 사용."""
+        last_frame: Optional[np.ndarray] = None
+        # 짧은 시간 동안 여러 번 read() 해서 버퍼에 쌓인 이전 프레임은 버리고 마지막 것만 사용
+        for _ in range(4):
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            last_frame = frame
+        if last_frame is None:
+            print("[cv_web] capture_frame: 유효한 프레임을 읽지 못했습니다")
             return None
-        return frame
+        return last_frame
 
     @app.route("/")
     def index():
@@ -381,7 +397,7 @@ def start_cv_web_server(
         pkl_path = str(BASE_DIR / "chess_pieces.pkl")
 
     if cap is None:
-        cap = PiCam2Capture()
+        cap = USBCapture()
     safe_cap = ThreadSafeCapture(cap)
 
     init_board_values = np.load(np_path) if os.path.exists(np_path) else None

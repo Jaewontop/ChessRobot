@@ -1,0 +1,9 @@
+flask
+numpy
+opencv-python
+python-chess
+pyserial
+
+# 아래 모듈은 pip 대신 Raspberry Pi OS 패키지로 설치해야 합니다.
+# picamera2 (sudo apt install -y python3-picamera2)
+

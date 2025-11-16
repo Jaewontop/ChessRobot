@@ -22,6 +22,9 @@ class TimerManager:
         self.white_timer = 600
         self.monitor_thread = None
         self.is_monitoring = False
+        self.debug_serial = False
+        self._next_button_signal = None
+        self._active_side = None  # 'white' or 'black'
         
         # 모니터링 서버 설정
         self.monitor_server_url = 'http://localhost:5002'
@@ -89,25 +92,45 @@ class TimerManager:
             return None
         
         try:
-            if self.serial.in_waiting > 0:
-                raw_data = self.serial.readline()
-                data = raw_data.decode().strip()
-                
-                # 버튼 입력 패턴 감지
-                # 예상 형식들: "BUTTON_P1", "BUTTON_P2", "BTN:P1", "BTN:P2", "PRESS:P1", "PRESS:P2"
-                if any(keyword in data.upper() for keyword in ['BUTTON', 'BTN', 'PRESS']):
-                    if 'P1' in data.upper():
-                        print(f"[🔘] P1(검은색) 버튼 입력 감지: {data}")
-                        return 'P1'
-                    elif 'P2' in data.upper():
-                        print(f"[🔘] P2(흰색) 버튼 입력 감지: {data}")
-                        return 'P2'
-                
-                # 단순 버튼 명령 형식
-                elif data.upper() in ['P1', 'P2']:
-                    print(f"[🔘] 버튼 입력 감지: {data}")
-                    return data.upper()
-                
+            if self.serial.in_waiting <= 0:
+                return None
+
+            raw_data = self.serial.readline()
+            data = raw_data.decode(errors="ignore").strip()
+
+            if not data:
+                if self.debug_serial:
+                    print("[Timer][DEBUG] empty read from serial")
+                return None
+
+            timer_data = self.parse_timer_data(data)
+            if timer_data:
+                self.update_timers_from_data(timer_data)
+                if self._next_button_signal:
+                    signal = self._next_button_signal
+                    self._next_button_signal = None
+                    return signal
+                return None
+
+            # 버튼 입력 패턴 감지
+            # 예상 형식들: "BUTTON_P1", "BUTTON_P2", "BTN:P1", "BTN:P2", "PRESS:P1", "PRESS:P2"
+            upper = data.upper()
+            if any(keyword in upper for keyword in ['BUTTON', 'BTN', 'PRESS']):
+                if 'P1' in upper:
+                    print(f"[🔘] P1(검은색) 버튼 입력 감지: {data}")
+                    return 'P1'
+                if 'P2' in upper:
+                    print(f"[🔘] P2(흰색) 버튼 입력 감지: {data}")
+                    return 'P2'
+
+            # 단순 버튼 명령 형식
+            if upper in ['P1', 'P2']:
+                print(f"[🔘] 버튼 입력 감지: {data}")
+                return upper
+
+        except serial.SerialException as e:
+            print(f"[!] 버튼 입력 감지 오류: 시리얼 예외 - {e}")
+            self.is_connected = False
         except Exception as e:
             print(f"[!] 버튼 입력 감지 오류: {e}")
         
@@ -121,8 +144,7 @@ class TimerManager:
         try:
             if self.serial.in_waiting > 0:
                 raw_data = self.serial.readline()
-                data = raw_data.decode().strip()
-                
+                data = raw_data.decode(errors="ignore").strip()                
                 
                 timer_data = self.parse_timer_data(data)
                 if timer_data:
@@ -176,10 +198,34 @@ class TimerManager:
                     p1_time = int(parts[0].split(':')[1])
                     p2_time = int(parts[1].split(':')[1])
                     
+                    prev_black = self.black_timer
+                    prev_white = self.white_timer
+
                     # P1은 검은색, P2는 흰색
                     self.black_timer = p1_time
                     self.white_timer = p2_time
-                    
+
+                    delta_black = prev_black - p1_time if prev_black is not None else 0
+                    delta_white = prev_white - p2_time if prev_white is not None else 0
+
+                    new_active = None
+                    if delta_black > 0 and delta_white <= 0:
+                        new_active = 'black'
+                    elif delta_white > 0 and delta_black <= 0:
+                        new_active = 'white'
+
+                    if new_active and new_active != self._active_side:
+                        if new_active == 'black':
+                            self._next_button_signal = 'P2'  # 흰색 버튼이 눌림
+                            if self.debug_serial:
+                                print("[Timer][DEBUG][INFER BUTTON] 흰색 종료 → P2 버튼 추정")
+                        elif new_active == 'white':
+                            self._next_button_signal = 'P1'  # 검은색 버튼이 눌림
+                            if self.debug_serial:
+                                print("[Timer][DEBUG][INFER BUTTON] 검은색 종료 → P1 버튼 추정")
+                    if new_active:
+                        self._active_side = new_active
+
                     # print(f"[✓] 타이머 업데이트: 흰색 {self.format_time(self.white_timer)}, 검은색 {self.format_time(self.black_timer)}")
                     return True
                     
@@ -220,6 +266,12 @@ class TimerManager:
         self.monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
         self.monitor_thread.start()
         print(f"[✓] 타이머 모니터링 시작")
+
+    def set_debug(self, enabled: bool = True):
+        """시리얼 디버그 출력 설정"""
+        self.debug_serial = enabled
+        state = "활성화" if enabled else "비활성화"
+        print(f"[Timer] 시리얼 디버그 {state}")
     
     def stop_monitoring(self):
         """타이머 모니터링 정지"""
@@ -257,6 +309,10 @@ timer_manager = TimerManager()
 def get_timer_manager():
     """전역 타이머 매니저 반환"""
     return timer_manager
+
+def set_timer_debug(enabled: bool = True):
+    """타이머 시리얼 디버그 활성화/비활성화"""
+    timer_manager.set_debug(enabled)
 
 def connect_timer():
     """타이머 연결 (편의 함수)"""
@@ -309,6 +365,7 @@ def start_arduino_thread():
 def init_chess_timer():
     """체스 게임용 타이머 초기화"""
     print(f"[→] 체스 게임 타이머 초기화 중...")
+    timer_manager.set_debug(True)
     
     # 타이머 연결 시도
     if start_arduino_thread():

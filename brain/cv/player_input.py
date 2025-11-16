@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import chess
 
-import game_state
-from move_analyzer import analyze_coordinates
-from timer_control import check_timer_button_press
+from game import game_state
+from game.move_analyzer import analyze_coordinates
+from timer.timer_control import check_timer_button_press
 
 
 def get_move_from_user():

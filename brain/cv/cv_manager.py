@@ -9,19 +9,66 @@ from __future__ import annotations
 import os
 import time
 import pickle
+from pathlib import Path
 from typing import Iterable, List, Optional, Tuple, Callable, Dict, Any
 
 import cv2
 import numpy as np
 
-from warp_cam_picam2_stable_v2 import warp_chessboard
-from piece_auto_update import update_chess_pieces
+from cv.picam_stable import warp_chessboard
+from cv.piece_auto_update import update_chess_pieces
 
 try:
     from piece_recognition import _pair_moves as default_pair_moves_fn
 except ImportError:
     default_pair_moves_fn = None  # type: ignore
 
+
+def _fallback_pair_moves(
+    deltas_flat: np.ndarray,
+    norms_flat: np.ndarray,
+    *,
+    threshold: float,
+) -> List[Tuple[int, int]]:
+    norms = np.asarray(norms_flat, dtype=np.float32)
+    if norms.size == 0:
+        return []
+
+    # 높은 변화량 순으로 정렬
+    order = np.argsort(-norms)
+    candidates: List[int] = []
+
+    for idx in order:
+        if norms[idx] >= threshold:
+            candidates.append(int(idx))
+        if len(candidates) >= 4:
+            break
+
+    if len(candidates) < 2:
+        top_two = order[:2].tolist()
+        candidates = [int(i) for i in top_two if i < norms.size]
+
+    pairs: List[Tuple[int, int]] = []
+    if len(candidates) >= 2:
+        pairs.append((candidates[0], candidates[1]))
+    return pairs
+
+
+if default_pair_moves_fn is None:
+
+    def _default_pair_moves(  # type: ignore
+        deltas: np.ndarray,
+        norms: np.ndarray,
+        *,
+        threshold: float = 9.0,
+    ) -> List[Tuple[int, int]]:
+        return _fallback_pair_moves(deltas, norms, threshold=threshold)
+
+    default_pair_moves_fn = _default_pair_moves  # type: ignore
+
+
+BASE_DIR = Path(__file__).resolve().parent
+MANUAL_CORNERS_PATH = BASE_DIR / "manual_corners.npy"
 
 _manual_corners: Optional[np.ndarray] = None  # TL, TR, BR, BL
 
@@ -47,6 +94,11 @@ def set_manual_corners(points: Iterable[Iterable[float]]) -> None:
     ordered = _order_corners_tl_tr_br_bl(points)
     _manual_corners = ordered
     print(f"[cv_manager] manual corners set: {ordered.tolist()}")
+    try:
+        np.save(MANUAL_CORNERS_PATH, _manual_corners)
+        print(f"[cv_manager] manual corners saved to {MANUAL_CORNERS_PATH}")
+    except Exception as e:
+        print(f"[cv_manager] failed to save manual corners: {e}")
 
 
 def clear_manual_corners() -> None:
@@ -54,6 +106,12 @@ def clear_manual_corners() -> None:
     global _manual_corners
     _manual_corners = None
     print("[cv_manager] manual corners cleared")
+    try:
+        if MANUAL_CORNERS_PATH.exists():
+            MANUAL_CORNERS_PATH.unlink()
+            print(f"[cv_manager] manual corners file removed: {MANUAL_CORNERS_PATH}")
+    except Exception as e:
+        print(f"[cv_manager] failed to remove manual corners file: {e}")
 
 
 def get_manual_corners(copy: bool = True) -> Optional[np.ndarray]:
@@ -64,6 +122,25 @@ def get_manual_corners(copy: bool = True) -> Optional[np.ndarray]:
 
 def manual_mode_enabled() -> bool:
     return _manual_corners is not None
+
+
+def _load_manual_corners_from_file() -> None:
+    """프로그램 시작 시 이전에 저장한 수동 코너를 자동 로드."""
+    global _manual_corners
+    if not MANUAL_CORNERS_PATH.exists():
+        return
+    try:
+        arr = np.load(MANUAL_CORNERS_PATH)
+        arr = np.asarray(arr, dtype=np.float32).reshape(4, 2)
+        _manual_corners = arr
+        print(f"[cv_manager] manual corners loaded from {MANUAL_CORNERS_PATH}: {arr.tolist()}")
+    except Exception as e:
+        print(f"[cv_manager] failed to load manual corners: {e}")
+        _manual_corners = None
+
+
+# 모듈 임포트 시 자동으로 이전 수동 코너 로드
+_load_manual_corners_from_file()
 
 
 # ---------------------------------------------------------------------------
@@ -150,13 +227,32 @@ def save_initial_board_from_frame(frame: np.ndarray, np_path: str, warp_size: in
     return board_vals
 
 
-def save_initial_board_from_capture(cap, np_path: str,
-                                    warp_size: int = 400) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """카메라에서 한 프레임을 캡처하여 초기 기준을 저장."""
-    ret, frame = cap.read()
-    if not ret:
-        print("[cv_manager] failed to read frame for initial board")
+def save_initial_board_from_capture(
+    cap,
+    np_path: str,
+    warp_size: int = 400,
+    max_tries: int = 30,
+    sleep_sec: float = 0.05,
+) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    """카메라에서 프레임을 여러 번 시도해서 캡처 후 초기 기준을 저장.
+
+    일부 USB 카메라는 초기 몇 프레임에서 read()가 실패하거나 빈 프레임을 반환할 수 있어
+    여러 번 재시도한 뒤 첫 유효 프레임을 사용한다.
+    """
+    frame = None
+    for i in range(max_tries):
+        ret, frm = cap.read()
+        if ret and frm is not None:
+            frame = frm
+            if i > 0:
+                print(f"[cv_manager] initial frame acquired after {i+1} tries")
+            break
+        time.sleep(sleep_sec)
+
+    if frame is None:
+        print("[cv_manager] failed to read frame for initial board (no valid frame)")
         return None, None
+
     board_vals = save_initial_board_from_frame(frame, np_path, warp_size=warp_size)
     warp = warp_with_manual_corners(frame, size=warp_size)
     return board_vals, warp

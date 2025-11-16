@@ -6,23 +6,23 @@ from typing import Optional
 
 import chess
 
-import game_state
-from board_display import display_board
-from cv_detection import detect_move_via_cv, initialize_board_reference, load_chess_pieces
-from cv_web import PiCam2Capture, ThreadSafeCapture, start_cv_web_server
-from engine_control import get_stockfish_response_move, make_stockfish_move
-from engine_manager import init_engine, shutdown_engine
-from game_utils import describe_game_end
-from robot_arm_controller import (
+from game import game_state
+from game.board_display import display_board
+from cv.cv_detection import detect_move_via_cv, initialize_board_reference, load_chess_pieces
+from cv.cv_web import USBCapture, ThreadSafeCapture, start_cv_web_server
+from engine.engine_control import get_stockfish_response_move, make_stockfish_move
+from engine.engine_manager import init_engine, shutdown_engine
+from game.game_utils import describe_game_end
+from robot_arm.robot_arm_controller import (
     connect_robot_arm,
     disconnect_robot_arm,
     get_robot_status,
     init_robot_arm,
     test_robot_connection,
 )
-from robot_control import perform_robot_move, wait_until_robot_idle
-from timer_control import check_time_over, press_timer_button
-from timer_manager import (
+from robot_arm.robot_control import perform_robot_move, wait_until_robot_idle
+from timer.timer_control import check_time_over, press_timer_button
+from timer.timer_manager import (
     check_timer_button,
     get_chess_timer_status,
     get_timer_manager,
@@ -66,13 +66,14 @@ def initialize_game(stockfish_path: str) -> bool:
     game_state.cv_turn_color = "white"
 
     try:
-        game_state.cv_capture = PiCam2Capture()
+        # USB 카메라 기준 캡처 초기화
+        game_state.cv_capture = USBCapture(index=0)
         game_state.cv_capture_wrapper = ThreadSafeCapture(game_state.cv_capture)
-        print("[✓] Picamera 캡처 초기화 완료")
+        print("[✓] USB 카메라 캡처 초기화 완료 (index=0)")
     except Exception as exc:
         game_state.cv_capture = None
         game_state.cv_capture_wrapper = None
-        print(f"[!] Picamera 초기화 실패: {exc}")
+        print(f"[!] USB 카메라 초기화 실패: {exc}")
 
     if game_state.cv_capture_wrapper is not None:
         print("[→] 체스판 기준값 초기화(CV) 중...")
@@ -86,8 +87,9 @@ def initialize_game(stockfish_path: str) -> bool:
             pkl_path=str(game_state.CHESS_PIECES_PATH),
             use_thread=True,
             cap=game_state.cv_capture_wrapper,
+            port=5003,
         )
-        print("[✓] CV 웹 모니터링 서버 시작 (http://0.0.0.0:5001)")
+        print("[✓] CV 웹 모니터링 서버 시작 (http://0.0.0.0:5003)")
     except Exception as exc:
         print(f"[!] CV 웹 서버 시작 실패: {exc}")
 
@@ -109,12 +111,6 @@ def game_loop() -> None:
     print(f"게임 설정: {game_state.player_color} 플레이어, 난이도 {game_state.difficulty}")
 
     while not game_state.game_over:
-        display_board()
-        print(
-            f"[DEBUG] 루프 시작 - 차례: "
-            f"{'백' if game_state.current_board.turn == chess.WHITE else '흑'}, "
-            f"FEN: {game_state.current_board.fen()}"
-        )
 
         if check_time_over():
             game_state.game_over = True
@@ -124,6 +120,13 @@ def game_loop() -> None:
         if not button_signal:
             time.sleep(0.1)
             continue
+
+        display_board()
+        print(
+            f"[DEBUG] 버튼 신호 감지 후 상태 - 차례: "
+            f"{'백' if game_state.current_board.turn == chess.WHITE else '흑'}, "
+            f"FEN: {game_state.current_board.fen()}"
+        )
 
         if button_signal == "white_turn_end":
             print("🔘 플레이어 버튼 감지 - 수를 분석합니다.")
