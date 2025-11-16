@@ -144,9 +144,11 @@ void loop() {
     String pos = Serial.readStringUntil('\n');
     pos.trim();
 
-    bool isCapture  = false;
-    bool isZero     = false;
-    bool isFullMove = false;
+    bool isCapture    = false;
+    bool isZero       = false;
+    bool isFullMove   = false;
+    bool isGripOpen   = false;
+    bool isGripClose  = false;
     String square      = ""; // 단일 좌표 명령용 ("e4", "e4cap"에서 "e4")
     String fromSquare  = ""; // 전체 이동 from ("e2e4" → "e2")
     String toSquare    = ""; // 전체 이동 to   ("e2e4" → "e4")
@@ -154,6 +156,13 @@ void loop() {
     // 제로 포지션 명령
     if (pos.equalsIgnoreCase("zero")) {
       isZero = true;
+    }
+    // 그리퍼 테스트 명령
+    else if (pos.equalsIgnoreCase("gripopen")) {
+      isGripOpen = true;
+    }
+    else if (pos.equalsIgnoreCase("gripclose")) {
+      isGripClose = true;
     }
     // "e4cap" 같은 형식 감지 (캡처용 단일 좌표 명령)
     else if (pos.endsWith("cap") && pos.length() >= 5) {
@@ -176,6 +185,16 @@ void loop() {
       Serial.println("ZERO 명령 수신: 제로 포지션으로 이동");
       robotArm.moveTo(365, 0, 330); // setup에서 사용한 준비 자세와 동일
       delay(1000);
+    }
+    else if (isGripOpen) {
+      Serial.println("GRIPOPEN 명령 수신: 그리퍼 열기");
+      robotArm.gripOpen();
+      delay(300);
+    }
+    else if (isGripClose) {
+      Serial.println("GRIPCLOSE 명령 수신: 그리퍼 닫기");
+      robotArm.gripClose();
+      delay(300);
     }
     // 전체 이동 명령 처리 ("e2e4"처럼 from → to)
     else if (isFullMove && fromSquare.length() == 2 && toSquare.length() == 2) {
