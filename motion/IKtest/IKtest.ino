@@ -134,27 +134,51 @@ void setup()
 void loop() {
 
   if (Serial.available()) {
-    float x, y, z;   // int 대신 float로 변경 (좌표 연산에 적합)
-
+    // 라즈베리파이(brain)에서 들어오는 명령 처리
+    // - 일반 이동: "e2", "e4" ...
+    // - 캡처: "e4cap" (먼저 e4 위치의 말을 잡아서 DEAD_ZONE으로 이동)
 
     String pos = Serial.readStringUntil('\n');
     pos.trim();
 
-    if (pos.length() == 2) {
+    bool isCapture = false;
+    String square = "";
+
+    // "e4cap" 같은 형식 감지
+    if (pos.endsWith("cap") && pos.length() >= 5) {
+      square = pos.substring(0, 2); // 앞 2글자만 체스 좌표
+      isCapture = true;
+    }
+    // 일반 체스 좌표 (예: "e2")
+    else if (pos.length() == 2) {
+      square = pos;
+    }
+
+    if (square.length() == 2) {
       float x, y;
-      chessToCoordinates(pos, x, y);
+      chessToCoordinates(square, x, y);
 
       Serial.print("입력: "); Serial.println(pos);
       Serial.print("계산된 좌표 -> x: "); Serial.print(x);
       Serial.print(", y: "); Serial.println(y);
 
-      // 해당 위치로 이동
-      robotArm.moveTo(x, y, Z_HEIGHT);
-      delay(2000);
+      if (isCapture) {
+        // 1) 잡을 말 위치로 이동해서 집기
+        robotArm.moveTo(x, y, Z_HEIGHT);
+        delay(1000);
+        robotArm.gripClose(); delay(1000);
 
-      // 예시: 잡았다 놓기
-      robotArm.gripClose(); delay(1000);
-      robotArm.gripOpen();  delay(1000);
+        // 2) DEAD_ZONE으로 이동해서 버리기
+        robotArm.moveTo(0, DEAD_ZONE, Z_HEIGHT);
+        delay(1000);
+        robotArm.gripOpen(); delay(1000);
+      } else {
+        // 일반 이동 테스트: 해당 위치로 이동 후 집었다가 놓기
+        robotArm.moveTo(x, y, Z_HEIGHT);
+        delay(1000);
+        robotArm.gripClose(); delay(1000);
+        robotArm.gripOpen();  delay(1000);
+      }
     }
   // // x 입력
   // Serial.println("x좌표:");
@@ -179,6 +203,6 @@ void loop() {
 
   // 실제 로봇팔 제어 (객체 이름 주의!)
 
-  delay(500);  // 입력 템포 조절 (2초 → 0.5초로 줄임)
+  delay(500);  // 입력 템포 조절
   }
 }
