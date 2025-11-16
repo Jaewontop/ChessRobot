@@ -179,6 +179,10 @@ class RobotArmController:
                 # 마지막 명령이 아니면 잠시 대기
                 if i < len(commands):
                     time.sleep(0.5)
+
+            # 모든 이동이 끝나면 제로 포지션으로 복귀 명령 전송
+            print("🤖 모든 이동 완료, 제로 포지션으로 복귀 명령 전송: zero")
+            self._send_single_command("zero")
             
             print("✅ 모든 명령 실행 완료!")
             return True

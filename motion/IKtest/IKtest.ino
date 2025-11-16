@@ -142,10 +142,15 @@ void loop() {
     pos.trim();
 
     bool isCapture = false;
+    bool isZero = false;
     String square = "";
 
+    // 제로 포지션 명령
+    if (pos.equalsIgnoreCase("zero")) {
+      isZero = true;
+    }
     // "e4cap" 같은 형식 감지
-    if (pos.endsWith("cap") && pos.length() >= 5) {
+    else if (pos.endsWith("cap") && pos.length() >= 5) {
       square = pos.substring(0, 2); // 앞 2글자만 체스 좌표
       isCapture = true;
     }
@@ -154,7 +159,13 @@ void loop() {
       square = pos;
     }
 
-    if (square.length() == 2) {
+    if (isZero) {
+      // 제로 포지션으로 복귀
+      Serial.println("ZERO 명령 수신: 제로 포지션으로 이동");
+      robotArm.moveTo(50, 50, 40); // setup에서 사용한 준비 자세와 동일
+      delay(1000);
+    }
+    else if (square.length() == 2) {
       float x, y;
       chessToCoordinates(square, x, y);
 
