@@ -69,35 +69,59 @@ void RobotArmIK::moveTo(float x, float y, float z) {
   float theta_upper_rad = M_PI - atan2(z, d) - atan2(k2, k1); // theta 값 연산 실수 수정
 
   float theta_shoulder_deg = theta_shoulder_rad * 180.0 / M_PI;
-  float theta_upper_deg = theta_upper_rad * 180.0 / M_PI;
-  float theta_lower_deg = theta_lower_rad * 180.0 / M_PI;
+  float theta_upper_deg    = theta_upper_rad    * 180.0 / M_PI;
+  float theta_lower_deg    = theta_lower_rad    * 180.0 / M_PI;
 
-  // [중요] 계산된 각도를 실제 서보 모터의 0~180도 범위로 변환
-  // 이 부분은 실제 로봇팔의 조립 상태에 맞춰 수정이 필요합니다.
-  float shoulder_angle = constrain(theta_shoulder_deg, 0, 180);
-  float upper_angle    = constrain(theta_upper_deg, 0, 180);
-  float lower_angle    = constrain(theta_lower_deg, 0, 180);
+  // [중요] 실제 기구 한계에 맞춰 각도 범위를 조금 좁게 제한
+  float shoulder_angle = constrain(theta_shoulder_deg,  5, 175);
+  float upper_angle    = constrain(theta_upper_deg,    10, 170);
+  float lower_angle    = constrain(theta_lower_deg,    10, 160);
 
-  // PWM 값 계산
-  int pwm_shoulder = angleToPulse(channel_shoulder, shoulder_angle);
-  int pwm_upper    = angleToPulse(channel_upper, upper_angle);
-  int pwm_lower    = angleToPulse(channel_lower, lower_angle);
+  // ---- 부드러운 모션을 위한 보간 ----
+  // 이전 각도에서 목표 각도로 여러 단계에 걸쳐 이동
+  static float cur_shoulder = shoulder_angle;
+  static float cur_upper    = upper_angle;
+  static float cur_lower    = lower_angle;
 
-  // 디버깅용 로그 추가
+  const int   STEPS      = 25;   // 단계 수 (값을 늘리면 더 느리고 부드럽게)
+  const int   STEP_DELAY = 25;   // 각 단계 사이 지연(ms)
+
+  for (int i = 1; i <= STEPS; i++) {
+    float t = (float)i / (float)STEPS;
+
+    float step_shoulder = cur_shoulder + (shoulder_angle - cur_shoulder) * t;
+    float step_upper    = cur_upper    + (upper_angle    - cur_upper)    * t;
+    float step_lower    = cur_lower    + (lower_angle    - cur_lower)    * t;
+
+    int pwm_shoulder = angleToPulse(channel_shoulder, step_shoulder);
+    int pwm_upper    = angleToPulse(channel_upper,    step_upper);
+    int pwm_lower    = angleToPulse(channel_lower,    step_lower);
+
+    // 디버깅용 로그 (너무 많으면 필요할 때만 사용)
+    // Serial.print("[step] sh:"); Serial.print(step_shoulder);
+    // Serial.print(" up:"); Serial.print(step_upper);
+    // Serial.print(" lo:"); Serial.println(step_lower);
+
+    pwm->setPWM(channel_shoulder, 0, pwm_shoulder);
+    pwm->setPWM(channel_upper,    0, pwm_upper);
+    pwm->setPWM(channel_lower,    0, pwm_lower);
+
+    delay(STEP_DELAY);
+  }
+
+  // 최종 각도를 현재 상태로 저장
+  cur_shoulder = shoulder_angle;
+  cur_upper    = upper_angle;
+  cur_lower    = lower_angle;
+
+  // 최종 위치 로그
   Serial.print("[moveTo] x: "); Serial.print(x);
   Serial.print(", y: "); Serial.print(y);
   Serial.print(", z: "); Serial.print(z);
   Serial.print(" | shoulder_angle: "); Serial.print(shoulder_angle);
   Serial.print(", upper_angle: "); Serial.print(upper_angle);
   Serial.print(", lower_angle: "); Serial.print(lower_angle);
-  Serial.print(" | pwm_shoulder: "); Serial.print(pwm_shoulder);
-  Serial.print(", pwm_upper: "); Serial.print(pwm_upper);
-  Serial.print(", pwm_lower: "); Serial.println(pwm_lower);
-
-  // [수정] 채널 포함해서 호출
-  pwm->setPWM(channel_shoulder, 0, pwm_shoulder);
-  pwm->setPWM(channel_upper,    0, pwm_upper);
-  pwm->setPWM(channel_lower,    0, pwm_lower);
+  Serial.println();
 }
 
 // 그리퍼 열기
