@@ -30,10 +30,10 @@ class USBCapture:
     """USB 카메라를 위한 간단 래퍼 (cv2.VideoCapture 기반).
 
     rotate_180=True 이면 영상이 뒤집혀 있을 때 180도 회전 보정.
-    기본값은 False (카메라가 이미 올바른 방향이라는 가정).
+    기본값은 True (현재 세팅에서는 카메라가 180도 뒤집혀 있다고 가정).
     """
 
-    def __init__(self, index: int = 0, size=(1280, 720), fps: int = 30, rotate_180: bool = False):
+    def __init__(self, index: int = 0, size=(1280, 720), fps: int = 30, rotate_180: bool = True):
         # GStreamer 대신 V4L2 백엔드를 명시적으로 사용해 본다.
         self._cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
         self._rotate_180 = rotate_180
@@ -139,10 +139,18 @@ def build_app(state: Dict[str, Any]) -> Flask:
           <a href="/manual" target="_blank">[수동 4점 설정 페이지 열기]</a>
         </div>
         <div id="status" style="margin:12px 0; color:#006400;"></div>
+
         <div style="margin-top:20px; font-size:16px; color:#222;">
           <b>기물 이동 내역:</b><br>
           {{ move_str }}
         </div>
+
+        <div style="margin-top:24px;">
+          <h3>현재 diff 상위 2칸 미리보기</h3>
+          <p style="font-size:13px; color:#555;">(매 1초마다 최신 프레임 기준으로 두 칸을 표시합니다.)</p>
+          <img id="diff-img" src="/snapshot_diff?ts=" style="max-width:420px; border:1px solid #ccc" />
+        </div>
+
         <script>
         function setStatus(msg, ok=true){
           const s = document.getElementById('status');
@@ -164,6 +172,15 @@ def build_app(state: Dict[str, Any]) -> Flask:
             })
             .catch(e => setStatus('오류: '+e, false));
         }
+        function refreshDiff(){
+          const img = document.getElementById('diff-img');
+          if(img){
+            img.src = '/snapshot_diff?ts=' + Date.now();
+          }
+        }
+        // 페이지 로드 후 주기적으로 diff 이미지 갱신
+        setInterval(refreshDiff, 1000);
+        refreshDiff();
         </script>
         ''', turn_color=state["turn_color"], prev_turn_color=state["prev_turn_color"], move_str=move_str)
 
@@ -173,6 +190,59 @@ def build_app(state: Dict[str, Any]) -> Flask:
         if frame is None:
             return "카메라 프레임 없음", 500
         return Response(_encode_jpeg(frame), mimetype="image/jpeg")
+
+    @app.route("/snapshot_diff")
+    def snapshot_diff():
+        """
+        현재 프레임과 init_board_values.npy를 비교하여
+        diff가 가장 큰 두 칸을 사각형으로 표시한 이미지를 반환.
+        """
+        try:
+            curr_lab, warp = cv_manager.capture_avg_lab_board(
+                cap, n_frames=4, sleep_sec=0.02, warp_size=400
+            )
+            if curr_lab is None or warp is None:
+                return "보드를 캡처할 수 없습니다.", 500
+
+            prev_board_values = None
+            if np_path.exists():
+                try:
+                    prev_board_values = np.load(np_path)
+                except Exception as e:
+                    print(f"[cv_web] snapshot_diff: failed to load {np_path}: {e}")
+
+            # 이전 보드 기준이 없으면 그냥 warp만 보여줌
+            if prev_board_values is None:
+                img = warp
+            else:
+                prev_lab = cv_manager._bgr_to_lab_grid(prev_board_values)
+                deltas = curr_lab - prev_lab
+                mean_shift = deltas.reshape(-1, 3).mean(axis=0, dtype=np.float32)
+                deltas = deltas - mean_shift
+                norms = np.linalg.norm(deltas, axis=2)
+
+                flat = norms.flatten()
+                order = np.argsort(-flat)
+
+                h, w = warp.shape[:2]
+                cell_h = h // 8
+                cell_w = w // 8
+
+                highlight = warp.copy()
+                for k in range(min(2, len(order))):
+                    idx = int(order[k])
+                    i = idx // 8
+                    j = idx % 8
+                    y1, y2 = i * cell_h, (i + 1) * cell_h
+                    x1, x2 = j * cell_w, (j + 1) * cell_w
+                    cv2.rectangle(highlight, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+                img = highlight
+
+            return Response(_encode_jpeg(img), mimetype="image/jpeg")
+        except Exception as e:
+            print(f"[cv_web] snapshot_diff error: {e}")
+            return "diff 생성 실패", 500
 
     @app.route("/set_init_board", methods=["POST"])
     def set_init_board():
