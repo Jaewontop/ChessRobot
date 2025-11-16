@@ -17,7 +17,8 @@
 #define SQUARE_SIZE (EFFECTIVE_BOARD_SIZE / 8.0) // 한 칸의 크기 (20mm)
 #define ROBOT_ARM_OFFSET 20.0        // 로봇팔 중심과 체스판 시작점 사이의 거리 (mm)
 #define DEAD_ZONE 100.0              // 잡은 말을 놓는 구역의 좌표
-#define Z_HEIGHT 60.0                // 말을 잡거나 놓을 때의 Z축 높이
+#define GRIP_OPEN_HEIGHT 67.0         // 그리퍼 열림 각도
+#define Z_HEIGHT 30.0                // 말을 잡거나 놓을 때의 Z축 높이
 
 // 링크 길이 (mm)
 const float L1 = 300.0;
@@ -135,24 +136,35 @@ void loop() {
 
   if (Serial.available()) {
     // 라즈베리파이(brain)에서 들어오는 명령 처리
-    // - 일반 이동: "e2", "e4" ...
-    // - 캡처: "e4cap" (먼저 e4 위치의 말을 잡아서 DEAD_ZONE으로 이동)
+    // - 일반 이동: "e2e4" (from→to)
+    // - 캡처: "e4cap" (상대 말 제거), 이후 "e2e4" 등
+    // - 단일 좌표 테스트: "e2"
+    // - 제로 포지션: "zero"
 
     String pos = Serial.readStringUntil('\n');
     pos.trim();
 
-    bool isCapture = false;
-    bool isZero = false;
-    String square = "";
+    bool isCapture  = false;
+    bool isZero     = false;
+    bool isFullMove = false;
+    String square      = ""; // 단일 좌표 명령용 ("e4", "e4cap"에서 "e4")
+    String fromSquare  = ""; // 전체 이동 from ("e2e4" → "e2")
+    String toSquare    = ""; // 전체 이동 to   ("e2e4" → "e4")
 
     // 제로 포지션 명령
     if (pos.equalsIgnoreCase("zero")) {
       isZero = true;
     }
-    // "e4cap" 같은 형식 감지
+    // "e4cap" 같은 형식 감지 (캡처용 단일 좌표 명령)
     else if (pos.endsWith("cap") && pos.length() >= 5) {
       square = pos.substring(0, 2); // 앞 2글자만 체스 좌표
       isCapture = true;
+    }
+    // 전체 이동 명령 (예: "e2e4")
+    else if (pos.length() == 4) {
+      fromSquare = pos.substring(0, 2);
+      toSquare   = pos.substring(2, 4);
+      isFullMove = true;
     }
     // 일반 체스 좌표 (예: "e2")
     else if (pos.length() == 2) {
@@ -165,6 +177,34 @@ void loop() {
       robotArm.moveTo(50, 50, 40); // setup에서 사용한 준비 자세와 동일
       delay(1000);
     }
+    // 전체 이동 명령 처리 ("e2e4"처럼 from → to)
+    else if (isFullMove && fromSquare.length() == 2 && toSquare.length() == 2) {
+      float fx, fy, tx, ty;
+      chessToCoordinates(fromSquare, fx, fy);
+      chessToCoordinates(toSquare,   tx, ty);
+
+      Serial.print("입력(전체 이동): "); Serial.println(pos);
+      Serial.print("FROM -> x: "); Serial.print(fx);
+      Serial.print(", y: "); Serial.println(fy);
+      Serial.print("TO   -> x: "); Serial.print(tx);
+      Serial.print(", y: "); Serial.println(ty);
+
+      // 1) 출발 칸으로 이동해서 말을 집기
+      robotArm.moveTo(fx, fy, GRIP_OPEN_HEIGHT);
+      delay(400);
+      robotArm.gripOpen();
+      delay(400);
+      robotArm.moveTo(fx, fy, Z_HEIGHT);
+      delay(400);
+      robotArm.gripClose();
+      delay(400);
+
+      // 2) 도착 칸으로 이동해서 말을 놓기
+      robotArm.moveTo(tx, ty, Z_HEIGHT);
+      delay(400);
+      robotArm.gripOpen();
+    }
+    // 단일 좌표 명령 처리 ("e4" 또는 "e4cap")
     else if (square.length() == 2) {
       float x, y;
       chessToCoordinates(square, x, y);
@@ -175,16 +215,21 @@ void loop() {
 
       if (isCapture) {
         // 1) 잡을 말 위치로 이동해서 집기
+        robotArm.moveTo(x, y, GRIP_OPEN_HEIGHT);
+        delay(400);
+        robotArm.gripOpen();
+        delay(400);
         robotArm.moveTo(x, y, Z_HEIGHT);
-        delay(1000);
-        robotArm.gripClose(); delay(1000);
+        delay(400);
+        robotArm.gripClose();
+        delay(400);
 
         // 2) DEAD_ZONE으로 이동해서 버리기
         robotArm.moveTo(0, DEAD_ZONE, Z_HEIGHT);
-        delay(1000);
-        robotArm.gripOpen(); delay(1000);
+        delay(400);
+        robotArm.gripOpen(); 
       } else {
-        // 일반 이동 테스트: 해당 위치로 이동 후 집었다가 놓기
+        // 단일 위치 테스트: 해당 위치로 이동 후 집었다가 놓기
         robotArm.moveTo(x, y, Z_HEIGHT);
         delay(1000);
         robotArm.gripClose(); delay(1000);
