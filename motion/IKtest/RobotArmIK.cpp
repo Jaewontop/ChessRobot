@@ -86,6 +86,8 @@ void RobotArmIK::moveTo(float x, float y, float z) {
   const int   STEPS      = 25;   // 단계 수 (값을 늘리면 더 느리고 부드럽게)
   const int   STEP_DELAY = 25;   // 각 단계 사이 지연(ms)
 
+  int pwm_upper_test;
+
   for (int i = 1; i <= STEPS; i++) {
     float t = (float)i / (float)STEPS;
 
@@ -96,7 +98,7 @@ void RobotArmIK::moveTo(float x, float y, float z) {
     int pwm_shoulder = angleToPulse(channel_shoulder, step_shoulder);
     int pwm_upper    = angleToPulse(channel_upper,    step_upper);
     int pwm_lower    = angleToPulse(channel_lower,    step_lower);
-
+    
     // 디버깅용 로그 (너무 많으면 필요할 때만 사용)
     // Serial.print("[step] sh:"); Serial.print(step_shoulder);
     // Serial.print(" up:"); Serial.print(step_upper);
@@ -105,7 +107,7 @@ void RobotArmIK::moveTo(float x, float y, float z) {
     pwm->setPWM(channel_shoulder, 0, pwm_shoulder);
     pwm->setPWM(channel_upper,    0, pwm_upper);
     pwm->setPWM(channel_lower,    0, pwm_lower);
-
+    int pwm_upper_test = pwm_upper;
     delay(STEP_DELAY);
   }
 
@@ -121,7 +123,7 @@ void RobotArmIK::moveTo(float x, float y, float z) {
   Serial.print(" | shoulder_angle: "); Serial.print(shoulder_angle);
   Serial.print(", upper_angle: "); Serial.print(upper_angle);
   Serial.print(", lower_angle: "); Serial.print(lower_angle);
-  Serial.println();
+  Serial.println(pwm_upper_test);
 }
 
 // 그리퍼 열기

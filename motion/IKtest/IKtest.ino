@@ -16,7 +16,7 @@
 #define EFFECTIVE_BOARD_SIZE (CHESS_BOARD_SIZE - 2 * BOARD_MARGIN) // 실제 체스판 크기 (160mm)
 #define SQUARE_SIZE (EFFECTIVE_BOARD_SIZE / 8.0) // 한 칸의 크기 (20mm)
 #define ROBOT_ARM_OFFSET 20.0        // 로봇팔 중심과 체스판 시작점 사이의 거리 (mm)
-#define DEAD_ZONE 100.0              // 잡은 말을 놓는 구역의 좌표
+#define DEAD_ZONE 250.0              // 잡은 말을 놓는 구역의 좌표
 #define GRIP_OPEN_HEIGHT 67.0         // 그리퍼 열림 각도
 #define Z_HEIGHT 30.0                // 말을 잡거나 놓을 때의 Z축 높이
 
@@ -129,6 +129,8 @@ void setup()
     Serial.println("체스 로봇 좌표 시스템 초기화 완료");
 
   robotArm.moveTo(365,0,330); // 시작 준비 자세
+
+ 
   delay(2000);
 }
 
@@ -222,6 +224,7 @@ void loop() {
       robotArm.moveTo(tx, ty, Z_HEIGHT);
       delay(400);
       robotArm.gripOpen();
+      Serial.println("movecomplete");
     }
     // 단일 좌표 명령 처리 ("e4" 또는 "e4cap")
     else if (square.length() == 2) {
@@ -244,15 +247,18 @@ void loop() {
         delay(400);
 
         // 2) DEAD_ZONE으로 이동해서 버리기
-        robotArm.moveTo(0, DEAD_ZONE, Z_HEIGHT);
+        robotArm.moveTo(380, DEAD_ZONE, Z_HEIGHT);
         delay(400);
         robotArm.gripOpen(); 
+        Serial.println("movecomplete");
+
       } else {
         // 단일 위치 테스트: 해당 위치로 이동 후 집었다가 놓기
         robotArm.moveTo(x, y, Z_HEIGHT);
         delay(1000);
         robotArm.gripClose(); delay(1000);
         robotArm.gripOpen();  delay(1000);
+        Serial.println("movecomplete");
       }
     }
   delay(500);  // 입력 템포 조절
