@@ -66,10 +66,10 @@ def initialize_game(stockfish_path: str) -> bool:
     game_state.cv_turn_color = "white"
 
     try:
-        # USB 카메라 기준 캡처 초기화
-        game_state.cv_capture = USBCapture(index=0)
+        # USB 카메라 기준 캡처 초기화 (자동으로 사용 가능한 장치를 탐색)
+        game_state.cv_capture = USBCapture(rotate_90_cw=False, rotate_90_ccw=False, rotate_180=True)
         game_state.cv_capture_wrapper = ThreadSafeCapture(game_state.cv_capture)
-        print("[✓] USB 카메라 캡처 초기화 완료 (index=0)")
+        print(f"[✓] USB 카메라 캡처 초기화 완료 (/dev/video{game_state.cv_capture.index})")
     except Exception as exc:
         game_state.cv_capture = None
         game_state.cv_capture_wrapper = None

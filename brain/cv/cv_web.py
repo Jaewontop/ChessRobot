@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterable, Tuple
 import pickle
@@ -33,16 +34,49 @@ class USBCapture:
     기본값은 True (현재 세팅에서는 카메라가 180도 뒤집혀 있다고 가정).
     """
 
-    def __init__(self, index: int = 0, size=(1280, 720), fps: int = 30, rotate_180: bool = True):
-        # GStreamer 대신 V4L2 백엔드를 명시적으로 사용해 본다.
-        self._cap = cv2.VideoCapture(index, cv2.CAP_V4L2)
+    def __init__(
+        self,
+        index: int | Iterable[int] | None = None,
+        size=(1280, 720),
+        fps: int = 30,
+        rotate_180: bool = True,
+        rotate_90_ccw: bool = False,
+        rotate_90_cw: bool = False,
+    ):
+        """
+        index가 None이면 0~5 범위를 순회하며 첫 번째로 열리는 장치를 사용한다.
+        index에 정수 대신 반복가능 객체를 주면 해당 후보들을 순차적으로 시도한다.
+        """
+        if index is None:
+            candidates: Iterable[int] = range(0, 6)
+        elif isinstance(index, Iterable) and not isinstance(index, (str, bytes)):
+            candidates = index
+        else:
+            candidates = (index,)
+
+        candidates = list(candidates)
+        self._cap = None
+        self.index = None
         self._rotate_180 = rotate_180
-        if not self._cap.isOpened():
-            print(f"[USBCapture] /dev/video{index} 를 열 수 없습니다.")
+        self._rotate_90_ccw = rotate_90_ccw
+        self._rotate_90_cw = rotate_90_cw
+
+        for idx in candidates:
+            cap = cv2.VideoCapture(idx, cv2.CAP_V4L2)
+            if cap is not None and cap.isOpened():
+                self._cap = cap
+                self.index = idx
+                break
+            cap.release()
+
+        if self._cap is None or self.index is None:
+            raise RuntimeError(f"[USBCapture] 사용 가능한 카메라를 찾을 수 없습니다. 후보: {candidates}")
+
         try:
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
             self._cap.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
             self._cap.set(cv2.CAP_PROP_FPS, fps)
+            print(f"[USBCapture] /dev/video{self.index} 사용 중 (size={size}, fps={fps})")
         except Exception as e:
             print(f"[USBCapture] 카메라 속성 설정 실패: {e}")
 
@@ -55,6 +89,10 @@ class USBCapture:
         # 카메라가 180도 뒤집혀 있을 때 보정
         if self._rotate_180:
             frame = cv2.rotate(frame, cv2.ROTATE_180)
+        if self._rotate_90_ccw:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        elif self._rotate_90_cw:
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
 
         return True, frame
 
@@ -83,11 +121,23 @@ class ThreadSafeCapture:
                 self._cap.release()
 
 
-def _encode_jpeg(img: np.ndarray) -> bytes:
-    ok, buf = cv2.imencode(".jpg", img)
+def _encode_jpeg(img: np.ndarray, quality: int = 60) -> bytes:
+    quality = int(np.clip(quality, 10, 95))
+    ok, buf = cv2.imencode(".jpg", img, [int(cv2.IMWRITE_JPEG_QUALITY), quality])
     if not ok:
         raise RuntimeError("JPEG 인코딩 실패")
     return buf.tobytes()
+
+
+def _resize_for_preview(img: np.ndarray, max_width: int = 480) -> np.ndarray:
+    if img is None or img.size == 0:
+        return img
+    h, w = img.shape[:2]
+    if w <= max_width:
+        return img
+    scale = max_width / float(w)
+    new_size = (int(w * scale), int(h * scale))
+    return cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
 
 
 def _default_board() -> list:
@@ -105,6 +155,7 @@ def _default_board() -> list:
 
 def build_app(state: Dict[str, Any]) -> Flask:
     app = Flask(__name__)
+    logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
     cap: ThreadSafeCapture = state["cap"]
     np_path: Path = state["np_path"]
@@ -146,9 +197,9 @@ def build_app(state: Dict[str, Any]) -> Flask:
         </div>
 
         <div style="margin-top:24px;">
-          <h3>현재 diff 상위 2칸 미리보기</h3>
-          <p style="font-size:13px; color:#555;">(매 1초마다 최신 프레임 기준으로 두 칸을 표시합니다.)</p>
-          <img id="diff-img" src="/snapshot_diff?ts=" style="max-width:420px; border:1px solid #ccc" />
+          <h3>실시간 체스판 + diff 상위 2칸</h3>
+          <p style="font-size:13px; color:#555;">(매 1초마다 최신 프레임 기준으로 두 칸을 빨간 박스로 표시합니다.)</p>
+          <img id="board-img" src="/snapshot_board?ts=" style="max-width:420px; border:1px solid #ccc" />
         </div>
 
         <script>
@@ -172,15 +223,15 @@ def build_app(state: Dict[str, Any]) -> Flask:
             })
             .catch(e => setStatus('오류: '+e, false));
         }
-        function refreshDiff(){
-          const img = document.getElementById('diff-img');
+        function refreshBoard(){
+          const img = document.getElementById('board-img');
           if(img){
-            img.src = '/snapshot_diff?ts=' + Date.now();
+            img.src = '/snapshot_board?ts=' + Date.now();
           }
         }
-        // 페이지 로드 후 주기적으로 diff 이미지 갱신
-        setInterval(refreshDiff, 1000);
-        refreshDiff();
+        // 페이지 로드 후 주기적으로 보드 이미지 갱신
+        setInterval(refreshBoard, 1000);
+        refreshBoard();
         </script>
         ''', turn_color=state["turn_color"], prev_turn_color=state["prev_turn_color"], move_str=move_str)
 
@@ -189,18 +240,29 @@ def build_app(state: Dict[str, Any]) -> Flask:
         frame = capture_frame()
         if frame is None:
             return "카메라 프레임 없음", 500
-        return Response(_encode_jpeg(frame), mimetype="image/jpeg")
 
-    @app.route("/snapshot_diff")
-    def snapshot_diff():
+        manual_mode = request.args.get("manual") == "1"
+        if manual_mode:
+            img = frame
+            quality = 60
+        else:
+            img = _resize_for_preview(frame, max_width=480)
+            quality = 45
+        return Response(_encode_jpeg(img, quality=quality), mimetype="image/jpeg")
+
+    @app.route("/snapshot_board")
+    def snapshot_board():
         """
-        현재 프레임과 init_board_values.npy를 비교하여
-        diff가 가장 큰 두 칸을 사각형으로 표시한 이미지를 반환.
+        현재 프레임을 체스판으로 warp한 뒤,
+        init_board_values.npy와 비교해 diff가 가장 큰 두 칸을 빨간 박스로 표시한 이미지를 반환.
         """
         try:
-            curr_lab, warp = cv_manager.capture_avg_lab_board(
-                cap, n_frames=4, sleep_sec=0.02, warp_size=400
-            )
+            def capture_board():
+                return cv_manager.capture_avg_lab_board(
+                    cap, n_frames=4, sleep_sec=0.02, warp_size=400
+                )
+
+            curr_lab, warp = capture_board()
             if curr_lab is None or warp is None:
                 return "보드를 캡처할 수 없습니다.", 500
 
@@ -209,40 +271,44 @@ def build_app(state: Dict[str, Any]) -> Flask:
                 try:
                     prev_board_values = np.load(np_path)
                 except Exception as e:
-                    print(f"[cv_web] snapshot_diff: failed to load {np_path}: {e}")
+                    print(f"[cv_web] snapshot_board: failed to load {np_path}: {e}")
 
             # 이전 보드 기준이 없으면 그냥 warp만 보여줌
             if prev_board_values is None:
                 img = warp
             else:
                 prev_lab = cv_manager._bgr_to_lab_grid(prev_board_values)
-                deltas = curr_lab - prev_lab
-                mean_shift = deltas.reshape(-1, 3).mean(axis=0, dtype=np.float32)
-                deltas = deltas - mean_shift
-                norms = np.linalg.norm(deltas, axis=2)
 
+                def compute_norms(curr_lab_arr):
+                    deltas = curr_lab_arr - prev_lab
+                    return np.linalg.norm(deltas, axis=2)
+
+                norms = compute_norms(curr_lab)
                 flat = norms.flatten()
                 order = np.argsort(-flat)
 
                 h, w = warp.shape[:2]
                 cell_h = h // 8
+                
                 cell_w = w // 8
 
                 highlight = warp.copy()
-                for k in range(min(2, len(order))):
-                    idx = int(order[k])
-                    i = idx // 8
-                    j = idx % 8
-                    y1, y2 = i * cell_h, (i + 1) * cell_h
-                    x1, x2 = j * cell_w, (j + 1) * cell_w
-                    cv2.rectangle(highlight, (x1, y1), (x2, y2), (0, 0, 255), 2)
+
+                # for k in range(min(2, len(order))):
+                #     idx = int(order[k])
+                #     i = idx // 8
+                #     j = idx % 8
+                #     y1, y2 = i * cell_h, (i + 1) * cell_h
+                #     x1, x2 = j * cell_w, (j + 1) * cell_w
+                #     cv2.rectangle(highlight, (x1, y1), (x2, y2), (0, 0, 255), 2)
 
                 img = highlight
 
-            return Response(_encode_jpeg(img), mimetype="image/jpeg")
+            return Response(_encode_jpeg(img, quality=55), mimetype="image/jpeg")
         except Exception as e:
-            print(f"[cv_web] snapshot_diff error: {e}")
-            return "diff 생성 실패", 500
+            print(f"[cv_web] snapshot_board error: {e}")
+            return "보드 이미지 생성 실패", 500
+
 
     @app.route("/set_init_board", methods=["POST"])
     def set_init_board():
@@ -256,6 +322,7 @@ def build_app(state: Dict[str, Any]) -> Flask:
     @app.route("/next_turn", methods=["POST"])
     def next_turn():
         try:
+            time.sleep(5.0)
             result = cv_manager.process_turn_transition(
                 state["cap"],
                 str(np_path),
@@ -327,7 +394,7 @@ def build_app(state: Dict[str, Any]) -> Flask:
                 <button class="btn" onclick="clearServer()">서버 해제(/clear_corners)</button>
               </div>
               <div>
-                <img id="img" src="/snapshot_original?ts=" style="display:none;" onload="drawImage()" />
+                <img id="img" src="/snapshot_original?manual=1&ts=" style="display:none;" />
                 <canvas id="canvas" width="400" height="400"></canvas>
               </div>
             </div>
@@ -342,10 +409,24 @@ def build_app(state: Dict[str, Any]) -> Flask:
           const canvas = document.getElementById('canvas');
           const ctx = canvas.getContext('2d');
           let points = [];
+          let loadingSnapshot = false;
 
-          function loadSnapshot() {
-            document.getElementById('img').src = '/snapshot_original?ts=' + Date.now();
+          function loadSnapshot(force=false) {
+            if (loadingSnapshot && !force) return;
+            loadingSnapshot = true;
+            img.src = '/snapshot_original?manual=1&ts=' + Date.now();
           }
+
+          img.addEventListener('load', () => {
+            loadingSnapshot = false;
+            drawImage();
+          });
+
+          img.addEventListener('error', (e) => {
+            loadingSnapshot = false;
+            setStatus('스냅샷 로드 실패', false);
+            console.error('snapshot load error', e);
+          });
 
           function drawImage() {
             const w = img.naturalWidth || img.width;
@@ -442,7 +523,9 @@ def build_app(state: Dict[str, Any]) -> Flask:
             }catch(e){ setStatus('요청 실패: '+e, false); }
           }
 
-          loadSnapshot();
+          loadSnapshot(true);
+          // 수동 설정 화면에서도 카메라 프레임을 주기적으로 갱신
+          setInterval(() => loadSnapshot(false), 500);
           </script>
         </body>
         </html>
@@ -467,7 +550,7 @@ def start_cv_web_server(
         pkl_path = str(BASE_DIR / "chess_pieces.pkl")
 
     if cap is None:
-        cap = USBCapture()
+        cap = USBCapture(rotate_90_cw=False, rotate_90_ccw=False, rotate_180=True)
     safe_cap = ThreadSafeCapture(cap)
 
     init_board_values = np.load(np_path) if os.path.exists(np_path) else None

@@ -302,7 +302,7 @@ def process_turn_transition(
         *,
         pair_moves_fn: Optional[Callable[[np.ndarray, np.ndarray, float], List[Tuple[int, int]]]] = None,
         threshold: float = 9.0,
-        n_frames: int = 8,
+        n_frames: int = 1,
         sleep_sec: float = 0.02,
         warp_size: int = 400
 ) -> Dict[str, Any]:
