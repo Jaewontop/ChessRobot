@@ -97,11 +97,13 @@ class RobotArmController:
         # TODO: 캐슬링/프로모션 등은 아두이노 스케치 확장 후 여기서도 세분화
         return commands
     
-    def _send_single_command(self, command: str) -> bool:
-        """단일 명령 전송.
+    def _send_single_command(self, command: str, wait_for_completion: bool = True, timeout: float = 30.0) -> bool:
+        """단일 명령 전송 및 완료 신호 대기.
 
-        IKtest.ino 기준으로는 별도의 완료 신호(MOVE_COMPLETE)를 보내지 않으므로,
-        여기서는 명령만 전송하고, 짧게 응답을 로깅만 한 뒤 바로 True를 반환한다.
+        Args:
+            command: 전송할 명령
+            wait_for_completion: 완료 신호를 기다릴지 여부 (기본값: True)
+            timeout: 완료 신호 대기 최대 시간 (초)
         """
         if not self.is_connected:
             print("🤖 로봇팔이 연결되지 않았습니다. 명령 전송을 건너뜁니다.")
@@ -114,17 +116,39 @@ class RobotArmController:
             if self.serial_connection and self.serial_connection.is_open:
                 self.serial_connection.write(f"{command}\n".encode())
 
-                # 짧게 응답을 비동기적으로 읽어 로그만 남김
-                start_time = time.time()
-                while time.time() - start_time < 0.2:
-                    if self.serial_connection.in_waiting:
-                        response = self.serial_connection.readline().decode(errors="ignore").strip()
-                        if response:
-                            print(f"🤖 로봇팔 응답: {response}")
-                    else:
-                        time.sleep(0.02)
+                if wait_for_completion:
+                    # 완료 신호 대기 (MOVE_COMPLETE 또는 DONE)
+                    print("⏳ 로봇팔 완료 신호 대기 중...")
+                    start_time = time.time()
+                    completion_received = False
+                    
+                    while time.time() - start_time < timeout:
+                        if self.serial_connection.in_waiting:
+                            response = self.serial_connection.readline().decode(errors="ignore").strip()
+                            if response:
+                                print(f"🤖 로봇팔 응답: {response}")
+                                # 완료 신호 확인
+                                upper_response = response.upper()
+                                if any(keyword in upper_response for keyword in ['MOVE_COMPLETE', 'DONE', 'COMPLETE', 'READY']):
+                                    completion_received = True
+                                    print("✅ 로봇팔 완료 신호 수신")
+                                    break
+                        else:
+                            time.sleep(0.1)
+                    
+                    if not completion_received:
+                        print(f"⚠️ 완료 신호를 {timeout}초 내에 받지 못했습니다. 계속 진행합니다.")
+                else:
+                    # 완료 신호를 기다리지 않는 경우 (짧은 응답만 확인)
+                    start_time = time.time()
+                    while time.time() - start_time < 0.2:
+                        if self.serial_connection.in_waiting:
+                            response = self.serial_connection.readline().decode(errors="ignore").strip()
+                            if response:
+                                print(f"🤖 로봇팔 응답: {response}")
+                        else:
+                            time.sleep(0.02)
 
-                # IKtest.ino는 MOVE_COMPLETE를 보내지 않으므로, 성공으로 간주
                 return True
             else:
                 print("❌ 시리얼 연결이 열려있지 않습니다.")
@@ -171,18 +195,20 @@ class RobotArmController:
             for i, command in enumerate(commands, 1):
                 print(f"🤖 명령 {i}/{len(commands)} 실행 중: {command}")
                 
-                if not self._send_single_command(command):
+                # 각 명령에 대해 완료 신호 대기 (zero 명령은 반드시 대기)
+                wait_completion = (command == "zero" or i == len(commands))
+                if not self._send_single_command(command, wait_for_completion=wait_completion):
                     print(f"❌ 명령 {i} 실행 실패")
                     self.is_moving = False
                     return False
                 
                 # 마지막 명령이 아니면 잠시 대기
                 if i < len(commands):
-                    time.sleep(0.5)
+                    time.sleep(0.3)
 
             # 모든 이동이 끝나면 제로 포지션으로 복귀 명령 전송
             print("🤖 모든 이동 완료, 제로 포지션으로 복귀 명령 전송: zero")
-            self._send_single_command("zero")
+            self._send_single_command("zero", wait_for_completion=True)
             
             print("✅ 모든 명령 실행 완료!")
             return True
@@ -245,6 +271,24 @@ class RobotArmController:
             self.disconnect()
             return True
         return False
+    
+    def move_to_zero_position(self) -> bool:
+        """로봇팔을 제로 포지션으로 이동"""
+        if not self.enabled:
+            print("🤖 로봇팔이 비활성화되어 있습니다.")
+            return False
+        
+        if not self.is_connected:
+            print("🤖 로봇팔이 연결되지 않았습니다. 제로 포지션 이동을 건너뜁니다.")
+            return True  # 연결되지 않아도 성공으로 처리
+        
+        print("🤖 로봇팔을 제로 포지션으로 이동 중...")
+        success = self._send_single_command("zero", wait_for_completion=True, timeout=10.0)
+        if success:
+            print("✅ 로봇팔 제로 포지션 이동 완료")
+        else:
+            print("⚠️ 로봇팔 제로 포지션 이동 실패 (계속 진행)")
+        return success
 
 
 # 전역 인스턴스
@@ -291,3 +335,7 @@ def get_robot_status() -> Dict:
 def test_robot_connection() -> bool:
     """로봇팔 연결 테스트"""
     return _robot_controller.test_connection()
+
+def move_robot_to_zero_position() -> bool:
+    """로봇팔을 제로 포지션으로 이동"""
+    return _robot_controller.move_to_zero_position()

@@ -167,6 +167,44 @@ class TimerManager:
             print(f"[!] 아두이노 타이머 명령 전송 오류: {e}")
             return False
     
+    def wait_for_completion(self, timeout: float = 10.0) -> bool:
+        """타이머 아두이노에서 완료 신호를 기다림.
+        
+        Args:
+            timeout: 완료 신호 대기 최대 시간 (초)
+            
+        Returns:
+            완료 신호를 받았으면 True, 타임아웃이면 False
+        """
+        if not self.is_connected or not self.serial or not self.serial.is_open:
+            print("⚠️ 타이머가 연결되지 않았습니다. 완료 신호 대기를 건너뜁니다.")
+            return True  # 연결되지 않아도 성공으로 처리
+        
+        print("⏳ 타이머 완료 신호 대기 중...")
+        start_time = time.time()
+        
+        while time.time() - start_time < timeout:
+            if self.serial.in_waiting > 0:
+                raw_data = self.serial.readline()
+                data = raw_data.decode(errors="ignore").strip()
+                
+                if data:
+                    print(f"[Timer] 응답: {data}")
+                    # 완료 신호 확인
+                    upper_data = data.upper()
+                    if any(keyword in upper_data for keyword in ['MOVE_COMPLETE', 'DONE', 'COMPLETE', 'READY', 'TIMER_MOVE_DONE']):
+                        print("✅ 타이머 완료 신호 수신")
+                        return True
+            
+            time.sleep(0.1)
+        
+        print(f"⚠️ 타이머 완료 신호를 {timeout}초 내에 받지 못했습니다. 계속 진행합니다.")
+        return False
+    
+    def send_timer_move_command(self) -> bool:
+        """타이머로 이동하라는 명령 전송 (예: "MOVE_TIMER" 또는 "TIMER_MOVE")"""
+        return self.send_command("TIMER_MOVE")
+    
     def start_timer(self):
         """타이머 시작"""
         return self.send_command("START_TIMER")

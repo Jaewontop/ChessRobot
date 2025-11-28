@@ -48,3 +48,21 @@ def press_timer_button(button_id: str) -> None:
     except Exception as exc:
         print(f"[Timer] 타이머 명령 전송 실패: {exc}")
 
+
+def send_timer_move_command() -> bool:
+    """타이머로 이동하라는 명령 전송."""
+    try:
+        return get_timer_manager().send_timer_move_command()
+    except Exception as exc:
+        print(f"[Timer] 타이머 이동 명령 전송 실패: {exc}")
+        return False
+
+
+def wait_for_timer_completion(timeout: float = 10.0) -> bool:
+    """타이머 완료 신호 대기."""
+    try:
+        return get_timer_manager().wait_for_completion(timeout=timeout)
+    except Exception as exc:
+        print(f"[Timer] 타이머 완료 신호 대기 실패: {exc}")
+        return False
+

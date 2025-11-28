@@ -18,10 +18,16 @@ from robot_arm.robot_arm_controller import (
     disconnect_robot_arm,
     get_robot_status,
     init_robot_arm,
+    move_robot_to_zero_position,
     test_robot_connection,
 )
 from robot_arm.robot_control import perform_robot_move, wait_until_robot_idle
-from timer.timer_control import check_time_over, press_timer_button
+from timer.timer_control import (
+    check_time_over,
+    press_timer_button,
+    send_timer_move_command,
+    wait_for_timer_completion,
+)
 from timer.timer_manager import (
     check_timer_button,
     get_chess_timer_status,
@@ -49,6 +55,9 @@ def initialize_game(stockfish_path: str) -> bool:
         print("[✓] 로봇팔 연결 테스트 성공")
         if connect_robot_arm():
             print("[✓] 로봇팔 연결 완료")
+            # 로봇팔을 제로 포지션으로 이동
+            print("[→] 로봇팔을 제로 포지션으로 이동 중...")
+            move_robot_to_zero_position()
         else:
             print("[!] 로봇팔 연결 실패 - 명령 전송 없이 진행")
     else:
@@ -129,7 +138,9 @@ def game_loop() -> None:
         )
 
         if button_signal == "white_turn_end":
-            print("🔘 플레이어 버튼 감지 - 수를 분석합니다.")
+            print("🔘 플레이어 버튼 감지 - 1초 후 CV 작동 시작")
+            time.sleep(1.0)  # 상대방 착수 후 1초 대기
+            print("🔘 CV 작동 시작")
             handle_player_turn()
         else:
             print("⏳ 로봇 측 버튼 감지 - 대기합니다.")
@@ -174,6 +185,16 @@ def handle_player_turn() -> None:
     if not perform_robot_move(engine_move):
         print("[Stockfish] 로봇 이동 실패.")
         return
+
+    # 로봇팔 완료 신호는 perform_robot_move 내부에서 이미 대기함
+    # 로봇팔 완료 후 타이머로 이동 명령 전송
+    print("🤖 로봇팔 이동 완료, 타이머로 이동 명령 전송")
+    if send_timer_move_command():
+        # 타이머 완료 신호 대기
+        wait_for_timer_completion(timeout=10.0)
+        print("✅ 타이머 이동 완료")
+    else:
+        print("⚠️ 타이머 이동 명령 전송 실패 (계속 진행)")
 
     apply_detected_move(engine_move)
     press_timer_button("P1")
